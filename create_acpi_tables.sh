@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) 2025 Intel Corporation
+# Copyright (c) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 set -euo pipefail
@@ -157,9 +157,6 @@ parse_metadata() {
     extract_and_validate MEMORY           '.boot_config.memory'        || has_errors=true
     extract_and_validate BIOS             '.boot_config.bios'          || has_errors=true
     extract_and_validate ACPI_TABLES_PATH '.boot_config.acpi_tables'   || has_errors=true
-    extract_and_validate KERNEL           '.direct.kernel'             || has_errors=true
-    extract_and_validate INITRD           '.direct.initrd'             || has_errors=true
-    extract_and_validate CMDLINE          '.direct.cmdline'            || has_errors=true
 
     if [[ "$has_errors" == "true" ]]; then
         log_error "Metadata validation failed"
@@ -169,8 +166,6 @@ parse_metadata() {
     # Resolve paths relative to metadata.json location (if not already absolute)
     [[ "$BIOS" != /* ]] && BIOS="$metadata_dir/$BIOS"
     [[ "$ACPI_TABLES_PATH" != /* ]] && ACPI_TABLES_PATH="$metadata_dir/$ACPI_TABLES_PATH"
-    [[ "$KERNEL" != /* ]] && KERNEL="$metadata_dir/$KERNEL"
-    [[ "$INITRD" != /* ]] && INITRD="$metadata_dir/$INITRD"
 
     # Check if target directory for ACPI tables exists
     if [[ ! -d "$(dirname "$ACPI_TABLES_PATH")" ]]; then
@@ -180,20 +175,15 @@ parse_metadata() {
 
     ACPI_TABLES_PATH="$(realpath "$ACPI_TABLES_PATH")"
     BIOS="$(realpath "$BIOS")"
-    KERNEL="$(realpath "$KERNEL")"
-    INITRD="$(realpath "$INITRD")"
 
-    # Validate that provided BIOS, kernel, and initrd files exist
-    local file_path
-    for file_path in "$BIOS" "$KERNEL" "$INITRD"; do
-        if [[ ! -f "$file_path" ]]; then
-            log_error "File not found: $file_path"
-            exit 1
-        fi
-    done
+    # Validate that BIOS file exists
+    if [[ ! -f "$BIOS" ]]; then
+        log_error "BIOS file not found: $BIOS"
+        exit 1
+    fi
 
     log_success "Metadata parsed successfully"
-    log_info "Configuration: CPUs=$CPUS, Memory=$MEMORY, BIOS=$BIOS, ACPI Tables Target Path=$ACPI_TABLES_PATH, Kernel=$KERNEL, Initrd=$INITRD, Cmdline=$CMDLINE"
+    log_info "Configuration: CPUs=$CPUS, Memory=$MEMORY, BIOS=$BIOS, ACPI Tables Target Path=$ACPI_TABLES_PATH"
 }
 
 # Build Docker image
@@ -226,20 +216,19 @@ generate_acpi_tables() {
     log_warning "This script uses QEMU source from ppa:kobuk-team/tdx-release PPA which provides Intel TDX-enabled QEMU."
     log_warning "Some upstream BIOS files are missing in this QEMU source but are not required for ACPI table generation."
 
-    # Construct QEMU arguments
+    # Construct QEMU arguments using minimal QEMU arguments from Canonical's direct boot script
+    # https://github.com/canonical/tdx/blob/3.3/guest-tools/direct-boot/boot_direct.sh#L54
+    # to match ACPI event measurements
     local qemu_args=(
         "-accel" "kvm"
-        "-cpu" "host"
-        "-smp" "$CPUS"
         "-m" "$MEMORY"
+        "-smp" "$CPUS"
+        "-cpu" "host"
+        "-machine" "q35,kernel-irqchip=split,hpet=off,smm=off,pic=off"
         "-bios" "/usr/share/ovmf/OVMF.fd"
-        "-kernel" "/vmlinuz"
-        "-initrd" "/initrd.img"
         "-nographic"
         "-nodefaults"
         "-serial" "stdio"
-        "-machine" "q35,kernel-irqchip=split,hpet=off,smm=off,pic=off"
-        "-append" "$CMDLINE"
     )
 
     # Run Docker container
@@ -248,8 +237,6 @@ generate_acpi_tables() {
         --name "$CONTAINER_NAME" \
         --device /dev/kvm:/dev/kvm \
         -v "$BIOS:/usr/share/ovmf/OVMF.fd" \
-        -v "$INITRD:/initrd.img" \
-        -v "$KERNEL:/vmlinuz" \
         -v "$(dirname "$ACPI_TABLES_PATH"):/output" \
         "$IMAGE_NAME" \
         "${qemu_args[@]}"; then
