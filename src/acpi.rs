@@ -1,15 +1,20 @@
 /*
  * Copyright (c) 2025 Phala Network
  * Copyright (c) 2025 Tinfoil Inc
- * Copyright (c) 2025 Intel Corporation
+ * Copyright (c) 2025-2026 Intel Corporation
  * SPDX-License-Identifier: Apache-2.0
  */
 //! This module provides functionality to load ACPI tables for QEMU from files.
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use std::path::Path;
+use std::process::Command;
 
 use crate::util::read_file_data;
 use crate::Machine;
+
+const CREATE_ACPI_TABLES_SCRIPT: &str = include_str!("../create_acpi_tables.sh");
+const DOCKERFILE_QEMU_ACPI_DUMP: &str = include_str!("../Dockerfile.qemu-acpi-dump");
 
 const LDR_LENGTH: usize = 4096;
 const FIXED_STRING_LEN: usize = 56;
@@ -22,6 +27,10 @@ pub struct Tables {
 
 impl Machine<'_> {
     pub fn build_tables(&self) -> Result<Tables> {
+        if self.direct_boot && self.create_acpi_table {
+            generate_acpi_tables(self.metadata_path, self.distribution)?;
+        }
+
         let tables  = read_file_data(self.acpi_tables)?;
 
         let rsdp: Vec<u8> = if !self.rsdp.is_empty() {
@@ -282,4 +291,37 @@ fn find_acpi_table(tables: &[u8], signature: &str) -> Result<(u32, u32, u32)> {
     }
 
     bail!("Table not found: {signature}");
+}
+
+/// Generates ACPI tables for direct boot using a Docker container.
+/// This function should only be called for direct boot configurations.
+pub fn generate_acpi_tables(metadata_path: &Path, distribution: &str) -> Result<()> {
+    let tmp_dir = std::env::temp_dir();
+
+    // Write the embedded script to a temporary file
+    let script_path = tmp_dir.join("create_acpi_tables.sh");
+    std::fs::write(&script_path, CREATE_ACPI_TABLES_SCRIPT)
+        .context("Failed to write create_acpi_tables.sh to temporary directory")?;
+
+    // Write the embedded Dockerfile to a temporary file
+    let dockerfile_path = tmp_dir.join("Dockerfile.qemu-acpi-dump");
+    std::fs::write(&dockerfile_path, DOCKERFILE_QEMU_ACPI_DUMP)
+        .context("Failed to write Dockerfile.qemu-acpi-dump to temporary directory")?;
+
+    // Call dedicated bash script to create ACPI tables.
+    // TODO: Integrate functionality from bash script into `acpi.rs`.
+    let output = Command::new("bash")
+        .arg(&script_path)
+        .arg("-j")
+        .arg(metadata_path)
+        .arg("-d")
+        .arg(distribution)
+        .output()
+        .context("Failed to execute create_acpi_tables.sh script")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("ACPI table generation failed: {}", stderr));
+    }
+    Ok(())
 }

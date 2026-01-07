@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Phala Network
  * Copyright (c) 2025 Tinfoil Inc
- * Copyright (c) 2025 Intel Corporation
+ * Copyright (c) 2025-2026 Intel Corporation
  * SPDX-License-Identifier: Apache-2.0
  */
 use crate::tdvf::Tdvf;
@@ -9,6 +9,7 @@ use crate::{kernel, image, TdxMeasurements};
 use anyhow::{Context, Result};
 use fs_err as fs;
 use log::debug;
+use std::path::Path;
 
 #[derive(Debug, bon::Builder)]
 pub struct Machine<'a> {
@@ -29,6 +30,9 @@ pub struct Machine<'a> {
     pub mok_list_x: Option<&'a str>,
     pub sbat_level: Option<&'a str>,
     pub direct_boot: bool,
+    pub metadata_path: &'a Path,
+    pub create_acpi_table: bool,
+    pub distribution: &'a str,
 }
 
 impl Machine<'_> {

@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Phala Network
  * Copyright (c) 2025 Tinfoil Inc
- * Copyright (c) 2025 Intel Corporation
+ * Copyright (c) 2025-2026 Intel Corporation
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -10,13 +10,9 @@ use clap::Parser;
 use tdx_measure::{Machine, ImageConfig};
 use fs_err as fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 mod transcript;
 use transcript::generate_transcript;
-
-const CREATE_ACPI_TABLES_SCRIPT: &str = include_str!("../../create_acpi_tables.sh");
-const DOCKERFILE_QEMU_ACPI_DUMP: &str = include_str!("../../Dockerfile.qemu-acpi-dump");
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -131,7 +127,7 @@ impl PathResolver {
         Ok(Self { paths })
     }
 
-    fn build_machine(&self, direct_boot: bool) -> Machine<'_> {
+    fn build_machine<'a>(&'a self, direct_boot: bool, metadata_path: &'a Path, create_acpi_table: bool, distribution: &'a str) -> Machine<'a> {
         Machine::builder()
             .cpu_count(self.paths.cpu_count)
             .memory_size(self.paths.memory_size)
@@ -150,39 +146,11 @@ impl PathResolver {
             .mok_list_x(self.paths.mok_list_x.as_deref().unwrap_or(""))
             .sbat_level(self.paths.sbat_level.as_deref().unwrap_or(""))
             .direct_boot(direct_boot)
+            .metadata_path(metadata_path)
+            .create_acpi_table(create_acpi_table)
+            .distribution(distribution)
             .build()
     }
-}
-
-fn generate_acpi_tables(metadata_path: &Path, distribution: &str) -> Result<()> {
-    let tmp_dir = std::env::temp_dir();
-
-    // Write the embedded script to a temporary file
-    let script_path = tmp_dir.join("create_acpi_tables.sh");
-    std::fs::write(&script_path, CREATE_ACPI_TABLES_SCRIPT)
-        .context("Failed to write create_acpi_tables.sh to temporary directory")?;
-
-    // Write the embedded Dockerfile to a temporary file
-    let dockerfile_path = tmp_dir.join("Dockerfile.qemu-acpi-dump");
-    std::fs::write(&dockerfile_path, DOCKERFILE_QEMU_ACPI_DUMP)
-        .context("Failed to write Dockerfile.qemu-acpi-dump to temporary directory")?;
-
-    // Call dedicated bash script to create ACPI tables.
-    // TODO: Integrate functionality from bash script into `acpi.rs`.
-    let output = Command::new("bash")
-        .arg(&script_path)
-        .arg("-j")
-        .arg(metadata_path)
-        .arg("-d")
-        .arg(distribution)
-        .output()
-        .context("Failed to execute create_acpi_tables.sh script")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("ACPI table generation failed: {}", stderr));
-    }
-    Ok(())
 }
 
 fn process_measurements(config: &Cli, image_config: &ImageConfig) -> Result<()> {
@@ -190,12 +158,16 @@ fn process_measurements(config: &Cli, image_config: &ImageConfig) -> Result<()> 
     image_config.validate()
         .map_err(|e| anyhow!("Invalid image configuration: {}", e))?;
 
-    let mut direct_boot = true; // Direct boot by default
-    if !config.platform_only { // If platform only, skip boot mode validation
-        // Determine boot mode: CLI flag overrides JSON configuration
-        direct_boot = config.direct_boot.unwrap_or(image_config.is_direct_boot());
+    // Determine boot mode: CLI flag overrides JSON configuration, defaults to direct boot
+    let cli_direct_boot = config.direct_boot;
+    let has_indirect_boot = image_config.indirect_boot().is_some();
+    let direct_boot = match cli_direct_boot {
+        Some(value) => value,
+        None => !has_indirect_boot,
+    };
 
-        // Validate boot mode configuration
+    // Validate boot mode configuration (skip validation for platform-only mode)
+    if !config.platform_only {
         match (direct_boot, image_config.direct_boot(), image_config.indirect_boot()) {
             (true, None, _) => return Err(anyhow!("Direct boot mode specified but no direct boot configuration found in JSON")),
             (false, _, None) => return Err(anyhow!("Indirect boot mode specified but no indirect boot configuration found in JSON")),
@@ -203,32 +175,54 @@ fn process_measurements(config: &Cli, image_config: &ImageConfig) -> Result<()> 
         }
     }
 
-    // Generate ACPI tables if requested
-    if let Some(ref distribution) = config.create_acpi_tables {
-        if !direct_boot {
-            return Err(anyhow!("--create-acpi-tables flag is only valid with direct boot mode"));
-        }
-
-        generate_acpi_tables(&config.metadata, distribution)?;
-    }
-
     // Build machine
     let path_resolver = PathResolver::new(&config.metadata, image_config, !config.runtime_only)?;
-    let machine = path_resolver.build_machine(direct_boot);
+    let create_acpi_table = config.create_acpi_tables.is_some();
+    let distribution = config.create_acpi_tables.as_deref().unwrap_or("");
+    let mut error_msgs = String::new();
 
-    // Generate transcript
-    if let Some(ref transcript_file) = config.transcript {
-        return generate_transcript(transcript_file, &path_resolver, direct_boot, config.platform_only, config.runtime_only);
+    // Check usage of --create-acpi-tables flag
+    if create_acpi_table {
+        if !direct_boot {
+            error_msgs.push_str("--create-acpi-tables is not valid with indirect boot\n");
+        }
     }
+
+    // Check usage of ACPI table path
+    if !config.runtime_only {
+        let acpi_tables_path = Path::new(&path_resolver.paths.acpi_tables);
+        let acpi_tables_path_missing = !acpi_tables_path.exists();
+        if acpi_tables_path_missing {
+            if !direct_boot {
+                error_msgs.push_str(&format!("The ACPI tables file path must be provided in metadata.json and the file must exist. Path: {}\n", acpi_tables_path.display()));
+            } else if direct_boot && !create_acpi_table {
+                error_msgs.push_str(&format!("Either use --create-acpi-tables flag to generate the ACPI tables or ensure the ACPI tables file path is provided in metadata.json and the file exists. Path: {}\n", acpi_tables_path.display()));
+            }
+        }
+    }
+
+    if !error_msgs.is_empty() {
+        return Err(anyhow!(error_msgs.trim_end().to_owned()));
+    }
+
+    let machine = path_resolver.build_machine(direct_boot, &config.metadata, create_acpi_table, distribution);
 
     // Measure
     let measurements = if config.platform_only {
         machine.measure_platform().context("Failed to measure platform")?
     } else if config.runtime_only {
+        if create_acpi_table {
+            eprintln!("--create-acpi-tables is not required with --runtime-only and will be ignored");
+        }
         machine.measure_runtime().context("Failed to measure runtime")?
     } else {
         machine.measure().context("Failed to measure machine configuration")?
     };
+
+    // Generate transcript
+    if let Some(ref transcript_file) = config.transcript {
+        return generate_transcript(transcript_file, &path_resolver, direct_boot, config.platform_only, config.runtime_only);
+    }
 
     // Output results
     output_measurements(config, &measurements)?;
