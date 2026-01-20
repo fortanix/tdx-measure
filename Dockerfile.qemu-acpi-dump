@@ -1,9 +1,10 @@
-# Copyright (c) 2025 Intel Corporation
+# Copyright (c) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 ARG DISTRIBUTION=ubuntu:25.04
 FROM ${DISTRIBUTION}
 
+ARG QEMU_VERSION
 ARG ACPI_TABLES_NAME
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -20,13 +21,17 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Download QEMU source from Canonicals ppa:kobuk-team/tdx-release pacakge repository, which provides Intel TDX-enabled QEMU builds for Ubuntu 24.04 and 25.04
-RUN pull-ppa-source --ppa ppa:kobuk-team/tdx-release qemu
+RUN pull-ppa-source --ppa ppa:kobuk-team/tdx-release qemu ${QEMU_VERSION}
 
 RUN QEMU_WRK_DIR=$(find / -maxdepth 1 -type d -name "qemu*" | head -n 1) && \
     echo "Found QEMU directory: $QEMU_WRK_DIR" && \
-    ln -s "$QEMU_WRK_DIR" /qemu-source
+    ln -s "$QEMU_WRK_DIR" /qemu-source && \
+    useradd -m -s /sbin/nologin qemu-user && \
+    chown -R qemu-user:qemu-user "$QEMU_WRK_DIR"
 
 WORKDIR /qemu-source
+
+USER qemu-user
 
 # Patch QEMU source to dump ACPI tables: inject code to write ACPI tables to /output/, force EOI intercept to 1, and skip pc-bios/tests builds
 ARG acpi_tables_dump_loc='\n\n    int fd = open("\/output\/'"${ACPI_TABLES_NAME}"'", O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR);\n    if(fd != -1) {\n        int ret = write(fd, (uint8_t *)tables.table_data->data, tables.table_data->len);\n        if (ret < tables.table_data->len) {\n            printf("Error: Failed to write the acpi tables\\n");\n        } else {\n            printf("Successfully wrote the acpi tables to the file \\"'"${ACPI_TABLES_NAME}"'\\"\\n");\n        }\n    } else {\n        printf("Error: Failed to create acpi_tables file.\\n");\n    }\n    exit(0);'

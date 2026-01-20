@@ -15,6 +15,10 @@ readonly IMAGE_NAME="acpi-tables-generator"
 # Supported distributions
 readonly SUPPORTED_DISTROS=("ubuntu:25.04")
 
+# QEMU version mapping for each distribution
+declare -A QEMU_VERSIONS
+QEMU_VERSIONS["ubuntu:25.04"]="1:9.2.1+ds-1ubuntu4+tdx2.0~ppa2"
+
 # Color codes for output
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
@@ -193,11 +197,20 @@ build_docker_image() {
     # Get path to Dockerfile
     local DOCKERFILE_PATH="$SCRIPT_DIR/Dockerfile.qemu-acpi-dump"
 
+    # Get QEMU version for the distribution
+    local QEMU_VERSION="${QEMU_VERSIONS[$DISTRIBUTION]}"
+    if [[ -z "$QEMU_VERSION" ]]; then
+        log_error "No QEMU version defined for distribution: $DISTRIBUTION"
+        exit 1
+    fi
+    log_info "Using QEMU version: $QEMU_VERSION"
+
     # Build Docker image
     if ! docker build \
         --progress plain \
         --tag "$IMAGE_NAME" \
         --build-arg "DISTRIBUTION=$DISTRIBUTION" \
+        --build-arg "QEMU_VERSION=$QEMU_VERSION" \
         --build-arg "USER=$USER" \
         --build-arg "ACPI_TABLES_NAME=$(basename "$ACPI_TABLES_PATH")" \
         --file "$DOCKERFILE_PATH" \
@@ -231,18 +244,47 @@ generate_acpi_tables() {
         "-serial" "stdio"
     )
 
+    # Get host's kvm group ID for device access
+    local kvm_gid
+    kvm_gid=$(getent group kvm | cut -d: -f3)
+    if [[ -z "$kvm_gid" ]]; then
+        log_error "kvm group not found on host system"
+        exit 1
+    fi
+
+    # Create temporary directory for ACPI tables output to allow the user in the container to write to it.
+    local tmp_acpi_tables_dir
+    tmp_acpi_tables_dir=$(mktemp -d)
+    chmod o+rwx "$tmp_acpi_tables_dir"
+
     # Run Docker container
     if ! docker run \
         --rm \
         --name "$CONTAINER_NAME" \
         --device /dev/kvm:/dev/kvm \
-        -v "$BIOS:/usr/share/ovmf/OVMF.fd" \
-        -v "$(dirname "$ACPI_TABLES_PATH"):/output" \
+        --group-add "$kvm_gid" \
+        -v "$BIOS:/usr/share/ovmf/OVMF.fd:ro" \
+        -v "$tmp_acpi_tables_dir:/output" \
         "$IMAGE_NAME" \
         "${qemu_args[@]}"; then
         log_error "QEMU execution failed"
         exit 1
     fi
+
+    # Copy ACPI tables file from temporary directory to the expected path with proper permissions.
+    local tmp_acpi_tables_file
+    tmp_acpi_tables_file="$tmp_acpi_tables_dir/$(basename "$ACPI_TABLES_PATH")"
+    if [[ -f "$tmp_acpi_tables_file" ]]; then
+        sudo chmod o+rw "$tmp_acpi_tables_file"
+        cp "$tmp_acpi_tables_file" "$(dirname "$ACPI_TABLES_PATH")"
+        log_success "ACPI tables from temporary directory copied to: $ACPI_TABLES_PATH"
+    else
+        log_error "ACPI tables not found in temporary output: $tmp_acpi_tables_file"
+        exit 1
+    fi
+
+    # Clean up temporary ACPI tables directory.
+    rm -rf "$tmp_acpi_tables_dir"
 
     log_success "QEMU container executed successfully"
     log_info "QEMU command: ${qemu_args[*]}"
