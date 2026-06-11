@@ -332,6 +332,11 @@ struct QemuPkg<'a> {
 fn qemu_pkg_for<'a>(distribution: &str, version_override: Option<&'a str>) -> Result<QemuPkg<'a>> {
     // Pinned defaults for reproducibility; override via `--qemu-version`.
     let (source, default_version, image_digest): (&'static str, &'static str, &'static str) = match distribution {
+        "ubuntu:24.04" => (
+            "ppa",
+            "2:8.2.2+ds-0ubuntu1.4+tdx1.1",
+            "sha256:023f8a753c22258c9fe2d0005a7d28258038da7d620e9f93e9ad78aa266f9f11",
+        ),
         "ubuntu:25.04" => (
             "ppa",
             "1:9.2.1+ds-1ubuntu4+tdx2.0~ppa2",
@@ -343,7 +348,7 @@ fn qemu_pkg_for<'a>(distribution: &str, version_override: Option<&'a str>) -> Re
             "sha256:f3d28607ddd78734bb7f71f117f3c6706c666b8b76cbff7c9ff6e5718d46ff64",
         ),
         other => bail!(
-            "Unsupported distribution: {other}. Supported: ubuntu:25.04, ubuntu:26.04"
+            "Unsupported distribution: {other}. Supported: ubuntu:24.04, ubuntu:25.04, ubuntu:26.04"
         ),
     };
     Ok(QemuPkg {

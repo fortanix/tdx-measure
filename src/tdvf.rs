@@ -251,9 +251,10 @@ impl<'a> Tdvf<'a> {
 
         for s in &self.sections {
             let num_pages = s.memory_data_size / PAGE_SIZE;
-
             for page in 0..num_pages {
                 mem_page_add(&mut h, s, page);
+            }
+            for page in 0..num_pages {
                 mr_extend(&mut h, s, page);
             }
         }

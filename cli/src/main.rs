@@ -45,7 +45,7 @@ struct Cli {
     transcript: Option<PathBuf>,
 
     /// Generate ACPI tables for direct boot. First value is the distribution
-    /// (e.g. ubuntu:25.04, ubuntu:26.04); the optional second value pins a
+    /// (e.g. ubuntu:24.04 ubuntu:25.04, ubuntu:26.04); the optional second value pins a
     /// specific QEMU source-package version and otherwise defaults to the
     /// distribution's pinned version. Pass `""` for the version to opt into
     /// `pull-lp-source`'s current main-archive pick.

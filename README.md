@@ -6,8 +6,8 @@ Command-line tool and Rust library to calculate expected measurement of an Intel
 The `tdx-measure` tool takes a set of image binaries and platform config files as an input and outputs the corresponding TDX measurements. This makes it possible to exhaustively publish all images and config files that uniquely identify a TDX workload on a machine, making TD environments transparent and auditable.
 
 Currently, the tool is able to pre-calculate measurements for the boot chains from the Canonical's Intel TDX [repo](https://github.com/canonical/tdx).
-In particular, the measurement calculation was validated for TDs using Ubuntu 25.04 as guest OS running on Ubuntu 25.04 as host OS.
-The building and execution of `tdx-measure` was validated on Ubuntu 25.04.
+In particular, the measurement calculation was validated for TDs using Ubuntu 24.04 as guest OS running on Ubuntu 24.04 as host OS.
+The building and execution of `tdx-measure` was validated on Ubuntu 24.04.
 
 ### Acknowledgment
 This project is a fork of dstack-mr from the [Dstack-TEE/dstack](https://github.com/Dstack-TEE/dstack) repository.
@@ -29,7 +29,7 @@ This project is a fork of dstack-mr from the [Dstack-TEE/dstack](https://github.
       --transcript <TRANSCRIPT>             Generate a human-readable transcript of all metadata files and write to the specified file
       --create-acpi-tables <DISTRIBUTION> [<QEMU_VERSION>]
                                             Generate ACPI tables for direct boot mode. Only valid with direct boot.
-                                            <DISTRIBUTION> in {ubuntu:25.04, ubuntu:26.04}.
+                                            <DISTRIBUTION> in {ubuntu:24.04, ubuntu:25.04, ubuntu:26.04}.
                                             <QEMU_VERSION> overrides the pinned QEMU source-package version for the given distribution
                                             (pass `""` to fetch the current main-archive tip).
   -h, --help                                Print help
@@ -110,7 +110,7 @@ When `--create-acpi-tables` is passed, the tool builds a small Docker image that
 patches QEMU to dump `etc/acpi/tables` and exits before TD entry. This requires
 a working `docker` (with buildx) and, when `accel: "kvm"` is in effect, KVM on
 the host. Each supported distribution pins a known-good QEMU source version
-(`1:9.2.1+ds-1ubuntu4+tdx2.0~ppa2` for `ubuntu:25.04`, `1:10.2.1+ds-1ubuntu4`
+(`2:8.2.2+ds-0ubuntu1.4+tdx1.1` for `ubuntu:24.04`,`1:9.2.1+ds-1ubuntu4+tdx2.0~ppa2` for `ubuntu:25.04`, `1:10.2.1+ds-1ubuntu4`
 for `ubuntu:26.04`) so the same metadata + CLI produces the same ACPI bytes
 regardless of when the regen runs. Pass an explicit version as the second
 positional value of `--create-acpi-tables` to override the pin (e.g. to validate
