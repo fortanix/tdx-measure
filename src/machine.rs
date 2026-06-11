@@ -34,6 +34,7 @@ pub struct Machine<'a> {
     pub create_acpi_table: bool,
     pub distribution: &'a str,
     pub qemu_version: Option<&'a str>,
+    pub two_pass_add_pages: bool,
 }
 
 impl Machine<'_> {
@@ -43,7 +44,7 @@ impl Machine<'_> {
         // Measure platform
         let fw_data = fs::read(self.firmware)?;
         let tdvf = Tdvf::parse(&fw_data).context("Failed to parse TDVF metadata")?;
-        let mrtd = tdvf.mrtd().context("Failed to compute MR TD")?;
+        let mrtd = tdvf.mrtd(self).context("Failed to compute MR TD")?;
         let rtmr0 = tdvf.rtmr0(self).context("Failed to compute RTMR0")?;
 
         let rtmr1;
@@ -78,7 +79,7 @@ impl Machine<'_> {
     pub fn measure_platform(&self) -> Result<TdxMeasurements> {
         let fw_data = fs::read(self.firmware)?;
         let tdvf = Tdvf::parse(&fw_data).context("Failed to parse TDVF metadata")?;
-        let mrtd = tdvf.mrtd().context("Failed to compute MR TD")?;
+        let mrtd = tdvf.mrtd(self).context("Failed to compute MR TD")?;
         let rtmr0 = tdvf.rtmr0(self).context("Failed to compute RTMR0")?;
 
         Ok(TdxMeasurements {

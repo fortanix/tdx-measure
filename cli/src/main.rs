@@ -20,6 +20,10 @@ struct Cli {
     /// Path to metadata json file
     metadata: PathBuf,
 
+    /// Enable two-pass add pages
+    #[arg(long)]
+    two_pass_add_pages: Option<bool>,
+
     /// Enable direct boot (overrides JSON configuration)
     #[arg(long)]
     direct_boot: Option<bool>,
@@ -134,6 +138,7 @@ impl PathResolver {
     fn build_machine<'a>(
         &'a self,
         direct_boot: bool,
+        two_pass_add_pages: bool,
         metadata_path: &'a Path,
         create_acpi_table: bool,
         distribution: &'a str,
@@ -156,6 +161,7 @@ impl PathResolver {
             .mok_list_trusted(self.paths.mok_list_trusted.as_deref().unwrap_or(""))
             .mok_list_x(self.paths.mok_list_x.as_deref().unwrap_or(""))
             .sbat_level(self.paths.sbat_level.as_deref().unwrap_or(""))
+            .two_pass_add_pages(two_pass_add_pages)
             .direct_boot(direct_boot)
             .metadata_path(metadata_path)
             .create_acpi_table(create_acpi_table)
@@ -220,8 +226,10 @@ fn process_measurements(config: &Cli, image_config: &ImageConfig) -> Result<()> 
         return Err(anyhow!(error_msgs.trim_end().to_owned()));
     }
 
+    let two_pass_add_pages_enabled = config.two_pass_add_pages.unwrap_or(false);
     let machine = path_resolver.build_machine(
         direct_boot,
+        two_pass_add_pages_enabled,
         &config.metadata,
         create_acpi_table,
         distribution,

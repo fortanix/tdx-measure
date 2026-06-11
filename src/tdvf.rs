@@ -21,6 +21,11 @@ const TDVF_SECTION_TD_CFV: u32 = 0x01;
 const TDVF_SECTION_TD_HOB: u32 = 0x02;
 const TDVF_SECTION_TEMP_MEM: u32 = 0x03;
 
+pub enum PageAddOrder {
+    TwoPass,
+    SinglePass,
+}
+
 #[derive(Debug)]
 struct TdvfSection {
     data_offset: u32,
@@ -218,7 +223,7 @@ impl<'a> Tdvf<'a> {
         Ok(meta)
     }
 
-    pub fn mrtd(&self) -> Result<Vec<u8>> {
+    fn compute_mrtd(&self, variant: PageAddOrder) -> Result<Vec<u8>> {
         let mut h = Sha384::new();
 
         let mem_page_add = |h: &mut Sha384, s: &TdvfSection, page: u64| {
@@ -251,13 +256,32 @@ impl<'a> Tdvf<'a> {
 
         for s in &self.sections {
             let num_pages = s.memory_data_size / PAGE_SIZE;
-
-            for page in 0..num_pages {
-                mem_page_add(&mut h, s, page);
-                mr_extend(&mut h, s, page);
+            match variant {
+                PageAddOrder::TwoPass => {
+                    for page in 0..num_pages {
+                        mem_page_add(&mut h, s, page);
+                    }
+                    for page in 0..num_pages {
+                        mr_extend(&mut h, s, page);
+                    }
+                }
+                PageAddOrder::SinglePass => {
+                    for page in 0..num_pages {
+                        mem_page_add(&mut h, s, page);
+                        mr_extend(&mut h, s, page);
+                    }
+                }
             }
         }
         Ok(h.finalize().to_vec())
+    }
+
+    pub fn mrtd(&self, machine: &Machine) -> Result<Vec<u8>> {
+        self.compute_mrtd(if machine.two_pass_add_pages {
+            PageAddOrder::TwoPass
+        } else {
+            PageAddOrder::SinglePass
+        })
     }
 
     pub fn rtmr0(&self, machine: &Machine) -> Result<Vec<u8>> {

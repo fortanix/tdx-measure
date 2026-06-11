@@ -21,6 +21,7 @@ This project is a fork of dstack-mr from the [Dstack-TEE/dstack](https://github.
 
 ### Options
 ```
+      --two-pass-add-pages                  Enable two-pass add pages [possible values: true, false]
       --direct-boot <DIRECT_BOOT>           Enable direct boot (overrides JSON configuration) [possible values: true, false]
       --json                                Output JSON
       --json-file <JSON_FILE>               Output JSON to file
