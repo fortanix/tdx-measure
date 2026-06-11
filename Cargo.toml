@@ -14,12 +14,11 @@ hex = "0.4"
 thiserror = "2.0"
 sha2 = "0.10"
 anyhow = "1.0"
-object = "0.38"
-hex-literal = "1.1"
+object = { version = "0.38", default-features = false, features = ["pe"] }
 fs-err = "3.2"
 bon = "3.8"
 log = "0.4"
-tempfile = "3.27.0"
+tempfile = "=3.14.0"
 
 [dev-dependencies]
 serde_json = "1.0"
