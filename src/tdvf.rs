@@ -251,10 +251,9 @@ impl<'a> Tdvf<'a> {
 
         for s in &self.sections {
             let num_pages = s.memory_data_size / PAGE_SIZE;
+
             for page in 0..num_pages {
                 mem_page_add(&mut h, s, page);
-            }
-            for page in 0..num_pages {
                 mr_extend(&mut h, s, page);
             }
         }
@@ -310,6 +309,7 @@ impl<'a> Tdvf<'a> {
         if !machine.direct_boot {
             rtmr0_log.push(measure_tdx_efi_variable("605DAB50-E046-4300-ABB6-3DD810DD8B23", "SbatLevel", Some(b"sbat,1,2021030218\n"))?);
         }
+        rtmr0_log.push(measure_sha384(&[0x00, 0x00, 0x00, 0x00]));
 
         debug_print_log("RTMR0", &rtmr0_log);
         Ok(measure_log(&rtmr0_log))

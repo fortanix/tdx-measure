@@ -114,7 +114,6 @@ pub(crate) fn measure_rtmr1_direct(
     let rtmr1_log = vec![
         kernel_hash,
         measure_sha384(b"Calling EFI Application from Boot Option"),
-        measure_sha384(&[0x00, 0x00, 0x00, 0x00]), // Separator
         measure_sha384(b"Exit Boot Services Invocation"),
         measure_sha384(b"Exit Boot Services Returned with Success"),
     ];
