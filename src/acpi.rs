@@ -388,6 +388,7 @@ fn build_qemu_args(qemu: Option<&QemuShape>, cpus: u8, memory: &str) -> Vec<OsSt
             for v in &q.netdevs { push(&mut args, "-netdev", v); }
             for v in &q.devices { push(&mut args, "-device", v); }
             for v in &q.fw_cfg  { push(&mut args, "-fw_cfg", v); }
+            push(&mut args, "-serial",  "stdio");
         }
         None => {
             // Canonical direct-boot defaults: minimal args from
