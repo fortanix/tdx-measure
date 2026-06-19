@@ -609,24 +609,35 @@ fn format_load_option_attributes(attributes: u32) -> String {
     format!("{} (0x{:08x})", result, attributes)
 }
 
-/// Write boot variables with pretty printing and hex dumps
+/// Write boot configuration measurements with pretty printing and hex dumps.
 fn write_boot_variables(output: &mut Vec<u8>, paths: &PathStorage, direct_boot: bool) -> Result<()> {
-    writeln!(output, "=== Boot Variables ===").unwrap();
-    writeln!(output, "These are UEFI boot variables that control the boot process.").unwrap();
-    writeln!(output, "Reference: UEFI Specification 2.10+ Chapter 3: Boot Manager").unwrap();
-    writeln!(output).unwrap();
-
-    // Parse and display BootOrder
-    let boot_entries = write_boot_order_analysis(output, &paths.boot_order.as_deref().unwrap_or(""), direct_boot)?;
-
-    // Parse and display Boot#### variables
+    writeln!(output, "=== Boot Configuration Measurements ===").unwrap();
 
     if direct_boot {
-        // Boot0000 data for direct boot mode
-        let boot0000_hex = "090100002c0055006900410070007000000004071400c9bdb87cebf8344faaea3ee4af6516a10406140021aa2c4614760345836e8ab6f46623317fff0400";
-        let boot0000 = hex::decode(boot0000_hex).context("Failed to decode boot0000 hex string")?;
-        write_boot_option_analysis(output, "Boot0000", &boot0000)?;
+        // For direct boot, RTMR0's two boot-config events are NOT EFI boot
+        // variables — they are TDVF measurements of QEMU fw_cfg file contents
+        // (EV_PLATFORM_CONFIG_FLAGS, signature "QEMU FW CFG"), derived purely
+        // from the QEMU command line.
+        writeln!(output, "RTMR0 measures two QEMU fw_cfg files (EV_PLATFORM_CONFIG_FLAGS):").unwrap();
+        writeln!(output).unwrap();
+
+        writeln!(output, "--- \"BootMenu\" (etc/boot-menu-wait) ---").unwrap();
+        writeln!(output, "UINT16 interactive boot-menu timeout; 0 when no `-boot menu=on`.").unwrap();
+        write_raw_hex_dump(output, &[0x00, 0x00], "etc/boot-menu-wait (hex dump)")?;
+        writeln!(output).unwrap();
+
+        writeln!(output, "--- \"bootorder\" (bootorder fw_cfg) ---").unwrap();
+        writeln!(output, "Output of QEMU get_boot_devices_list(): NUL-terminated OFW paths.").unwrap();
+        writeln!(output, "With `-kernel`, QEMU registers linuxboot_dma.bin at bootindex 0.").unwrap();
+        let mut bootorder = b"/rom@genroms/linuxboot_dma.bin".to_vec();
+        bootorder.push(0x00);
+        write_raw_hex_dump(output, &bootorder, "bootorder (hex dump)")?;
     } else {
+        writeln!(output, "These are UEFI boot variables that control the boot process.").unwrap();
+        writeln!(output, "Reference: UEFI Specification 2.10+ Chapter 3: Boot Manager").unwrap();
+        writeln!(output).unwrap();
+
+        let boot_entries = write_boot_order_analysis(output, &paths.boot_order.as_deref().unwrap_or(""), direct_boot)?;
         for boot_entry in boot_entries {
             let name = format!("Boot{:04X}", boot_entry);
             let path = format!("{}/{}.bin", paths.path_boot_xxxx.as_deref().unwrap_or(""), name);
