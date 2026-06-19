@@ -16,9 +16,12 @@ use crate::util::read_file_data;
 use crate::{ImageConfig, Machine, QemuShape};
 
 const DOCKERFILE_QEMU_ACPI_DUMP: &str = include_str!("../Dockerfile.qemu-acpi-dump");
+const ENTRYPOINT_SH: &str = include_str!("../entrypoint.sh");
 const CONTAINER_NAME: &str = "acpi-tables-generator";
 const IMAGE_NAME: &str = "acpi-tables-generator";
 const OVMF_IN_CONTAINER: &str = "/usr/share/ovmf/OVMF.fd";
+/// Filename produced inside the container's /output by nvram mode.
+const NVRAM_OUT: &str = "OVMF_VARS.fd";
 
 const LDR_LENGTH: usize = 4096;
 const FIXED_STRING_LEN: usize = 56;
@@ -27,20 +30,43 @@ pub struct Tables {
     pub tables: Vec<u8>,
     pub rsdp: Vec<u8>,
     pub loader: Vec<u8>,
+    /// Path to a populated OVMF_VARS.fd that was auto-generated during this
+    /// build.  `None` when the caller supplied `machine.nvram` directly or
+    /// when NVRAM generation was not requested.
+    pub generated_nvram: Option<String>,
 }
 
 impl Machine<'_> {
     pub fn build_tables(&self) -> Result<Tables> {
-        if self.direct_boot && self.create_acpi_table {
-            generate_acpi_tables(self.metadata_path, self.distribution, self.qemu_version)?;
-        }
+        // Auto-generate ACPI tables (direct boot) or NVRAM (indirect boot).
+        let generated_nvram: Option<String> = if self.create_acpi_table {
+            if self.direct_boot {
+                generate_acpi_tables(self.metadata_path, self.distribution, self.qemu_version)?;
+                None
+            } else if let Some(qcow2) = self.qcow2.filter(|p| !p.is_empty()) {
+                // For indirect boot, generate the NVRAM so rtmr0() can read
+                // the correct Boot0000 / BootOrder EFI variables.
+                let nvram_path = generate_nvram(
+                    self.metadata_path,
+                    self.distribution,
+                    self.qemu_version,
+                    qcow2,
+                    self.nvram,
+                )?;
+                Some(nvram_path)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let tables  = read_file_data(self.acpi_tables)?;
 
         let rsdp: Vec<u8> = if !self.rsdp.is_empty() {
             read_file_data(self.rsdp)?
         } else {
-            let (rsdt_offset, _rsdt_csum, _rsdt_len) = find_acpi_table(&tables , "RSDT")?;
+            let (rsdt_offset, _rsdt_csum, _rsdt_len) = find_acpi_table(&tables, "RSDT")?;
 
             // Generate RSDP
             let mut rsdp = Vec::with_capacity(20);
@@ -62,6 +88,7 @@ impl Machine<'_> {
             tables,
             rsdp,
             loader,
+            generated_nvram,
         })
     }
 }
@@ -510,6 +537,219 @@ fn run_docker_container(
     Ok(())
 }
 
+/// Strip one or more comma-separated key=value params from a QEMU `-machine` string.
+fn strip_machine_params(machine: &str, strip_prefixes: &[&str]) -> String {
+    machine
+        .split(',')
+        .filter(|part| !strip_prefixes.iter().any(|p| part.starts_with(p)))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Return true for QEMU object specs that are TDX-specific and must be
+/// omitted when running an unconfidential QEMU for NVRAM generation.
+fn is_tdx_object(obj: &str) -> bool {
+    let obj_type = obj.split(',').next().unwrap_or("");
+    matches!(obj_type, "tdx-guest" | "memory-backend-memfd-private" | "iommufd")
+}
+
+/// Scan a list of `-device` values and return the first `drive=X` ID found.
+fn find_drive_id(devices: &[String]) -> Option<String> {
+    for dev in devices {
+        for part in dev.split(',') {
+            let mut kv = part.splitn(2, '=');
+            if kv.next() == Some("drive") {
+                if let Some(id) = kv.next() {
+                    return Some(id.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Build the QEMU command-line args for an unpatched OVMF boot used to
+/// populate NVRAM.  Stock QEMU inside the container runs with the container's
+/// built-in OVMF (from the `ovmf` apt package) in split pflash mode.
+///
+/// The QEMU args are prefixed by the "nvram" sentinel consumed by the
+/// container's entrypoint script.
+fn build_nvram_qemu_args(qemu: Option<&QemuShape>, memory: &str, use_kvm: bool) -> Vec<OsString> {
+    let mut args: Vec<OsString> = Vec::new();
+    let push = |args: &mut Vec<OsString>, k: &str, v: &str| {
+        args.push(k.into());
+        args.push(v.into());
+    };
+
+    // "nvram" is consumed by /entrypoint.sh to select the stock-QEMU path.
+    args.push("nvram".into());
+
+    // Stock OVMF in split pflash mode (paths inside the container from `ovmf` package)
+    push(&mut args, "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd");
+    push(&mut args, "-drive", "if=pflash,format=raw,file=/output/OVMF_VARS.fd");
+
+    push(&mut args, "-m", memory);
+    push(&mut args, "-accel", if use_kvm { "kvm" } else { "tcg" });
+    args.push("-nographic".into());
+    args.push("-nodefaults".into());
+    push(&mut args, "-serial", "null");
+
+    match qemu {
+        Some(q) => {
+            // Strip TDX-specific and accel-incompatible machine params
+            let mut machine = strip_machine_params(&q.machine, &["confidential-guest-support"]);
+            if !use_kvm {
+                machine = strip_machine_params(&machine, &["kernel-irqchip"]);
+            }
+            push(&mut args, "-machine", &machine);
+            push(&mut args, "-cpu", if use_kvm { &q.cpu } else { "qemu64" });
+
+            for obj in &q.objects {
+                if !is_tdx_object(obj) {
+                    push(&mut args, "-object", obj);
+                }
+            }
+            for dev in &q.devices {
+                push(&mut args, "-device", dev);
+            }
+
+            // Add the qcow2 disk drive, using the same drive ID that the
+            // device list references so the device path node is correct.
+            let disk_id = find_drive_id(&q.devices).unwrap_or_else(|| "disk0".to_owned());
+            push(&mut args, "-drive",
+                &format!("if=none,format=qcow2,file=/input/disk.qcow2,id={disk_id},readonly=on"));
+        }
+        None => {
+            // Minimal fallback: simple q35 with a single virtio-blk disk
+            push(&mut args, "-machine", "q35,smm=off");
+            push(&mut args, "-cpu", if use_kvm { "host" } else { "qemu64" });
+            push(&mut args, "-drive", "if=none,format=qcow2,file=/input/disk.qcow2,id=disk0,readonly=on");
+            push(&mut args, "-device", "virtio-blk-pci,drive=disk0");
+        }
+    }
+
+    args
+}
+
+/// Run the Docker container in nvram mode: stock QEMU boots with the user's
+/// qcow2 disk so OVMF can write Boot0000/BootOrder into the NVRAM pflash.
+/// The container is given `timeout_secs` seconds, after which QEMU is killed
+/// (timeout is expected — we just want OVMF to finish its BDS phase).
+fn run_docker_nvram_container(
+    output_dir: &Path,
+    qcow2: &Path,
+    nvram_args: &[OsString],
+    use_kvm: bool,
+) -> Result<()> {
+    info!("Running QEMU container in nvram mode to populate OVMF_VARS.fd...");
+
+    let mut cmd = Command::new("docker");
+    cmd.args(["run", "--rm", "--name", &format!("{CONTAINER_NAME}-nvram")]);
+
+    if let Some(gid) = kvm_group_id() {
+        cmd.arg("--group-add").arg(gid);
+    }
+    if use_kvm {
+        if !Path::new("/dev/kvm").exists() {
+            bail!(
+                "NVRAM generation needs /dev/kvm for a fast boot; \
+                 either enable KVM on this host or use `accel: \"tcg\"` in the qemu block"
+            );
+        }
+        cmd.args(["--device", "/dev/kvm:/dev/kvm"]);
+    }
+
+    // qcow2 is bind-mounted read-only; output dir receives OVMF_VARS.fd
+    cmd.arg("-v").arg(format!("{}:/input/disk.qcow2:ro", qcow2.display()));
+    cmd.arg("-v").arg(format!("{}:/output", output_dir.display()));
+    cmd.arg(IMAGE_NAME);
+    cmd.args(nvram_args);
+
+    // The container exits 0 on timeout (by design in entrypoint.sh).
+    let status = cmd.status().context("Failed to invoke `docker run` for nvram mode")?;
+    if !status.success() {
+        bail!("QEMU nvram container exited with failure (exit {status})");
+    }
+    Ok(())
+}
+
+/// Generate a populated OVMF_VARS.fd by booting stock QEMU+OVMF with the
+/// user's qcow2 disk inside the existing Docker image.  OVMF's BDS phase
+/// writes Boot0000 / BootOrder into the writable pflash; we copy the result
+/// to `nvram_output`.
+///
+/// When `user_nvram` is `Some`, that path is used as the output destination;
+/// otherwise the NVRAM is written next to the ACPI tables as `OVMF_VARS.fd`.
+pub fn generate_nvram(
+    metadata_path: &Path,
+    distribution: &str,
+    qemu_version: Option<&str>,
+    qcow2: &str,
+    user_nvram: Option<&str>,
+) -> Result<String> {
+    let pkg = qemu_pkg_for(distribution, qemu_version)?;
+
+    let raw_metadata = fs_err::read_to_string(metadata_path)
+        .context("Failed to read metadata.json for NVRAM generation")?;
+    let image_config: ImageConfig = serde_json::from_str(&raw_metadata)
+        .context("Failed to parse metadata.json for NVRAM generation")?;
+    let boot_config = image_config
+        .boot_config
+        .as_ref()
+        .context("boot_config is required to generate NVRAM")?;
+
+    // Determine where to write the NVRAM file
+    let nvram_output: PathBuf = if let Some(p) = user_nvram {
+        PathBuf::from(p)
+    } else {
+        let acpi_dir = resolve_metadata_path(metadata_path, &boot_config.acpi_tables);
+        acpi_dir
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(NVRAM_OUT)
+    };
+    if let Some(parent) = nvram_output.parent() {
+        fs_err::create_dir_all(parent)?;
+    }
+
+    let qcow2_path = PathBuf::from(qcow2)
+        .canonicalize()
+        .with_context(|| format!("qcow2 not found: {qcow2}"))?;
+
+    // Build (or reuse cached) Docker image — same image as ACPI generation.
+    let acpi_tables_target = resolve_metadata_path(metadata_path, &boot_config.acpi_tables);
+    let acpi_tables_name = acpi_tables_target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("acpi_tables.bin");
+
+    let build_ctx = tempfile::tempdir().context("Failed to create docker build context")?;
+    fs_err::write(build_ctx.path().join("Dockerfile.qemu-acpi-dump"), DOCKERFILE_QEMU_ACPI_DUMP)?;
+    fs_err::write(build_ctx.path().join("entrypoint.sh"), ENTRYPOINT_SH)?;
+    build_docker_image(build_ctx.path(), distribution, &pkg, acpi_tables_name)?;
+
+    // Output dir must be world-writable so the container (non-root qemu-user) can write
+    use std::os::unix::fs::PermissionsExt;
+    let output_dir = tempfile::tempdir().context("Failed to create NVRAM output dir")?;
+    fs_err::set_permissions(output_dir.path(), std::fs::Permissions::from_mode(0o777))?;
+
+    let use_kvm = boot_config.qemu.as_ref().map(|q| q.accel == "kvm").unwrap_or(true)
+        && Path::new("/dev/kvm").exists();
+    let nvram_args = build_nvram_qemu_args(boot_config.qemu.as_ref(), &boot_config.memory, use_kvm);
+
+    run_docker_nvram_container(output_dir.path(), &qcow2_path, &nvram_args, use_kvm)?;
+
+    let produced = output_dir.path().join(NVRAM_OUT);
+    if !produced.exists() {
+        bail!("NVRAM not found in container output — OVMF may not have booted far enough");
+    }
+    fs_err::copy(&produced, &nvram_output)?;
+    fs_err::set_permissions(&nvram_output, std::fs::Permissions::from_mode(0o644))?;
+    info!("NVRAM written to: {}", nvram_output.display());
+
+    Ok(nvram_output.to_string_lossy().into_owned())
+}
+
 /// Generates ACPI tables for direct boot by building and running a
 /// patched-QEMU Docker container. The patched QEMU writes the
 /// `etc/acpi/tables` blob it would have exposed via fw_cfg to
@@ -552,12 +792,10 @@ pub fn generate_acpi_tables(
         );
     }
 
-    // Stage the Dockerfile into a temp build context so `docker build` finds it.
+    // Stage the Dockerfile and entrypoint script into a temp build context.
     let build_ctx = tempfile::tempdir().context("Failed to create docker build context")?;
-    fs_err::write(
-        build_ctx.path().join("Dockerfile.qemu-acpi-dump"),
-        DOCKERFILE_QEMU_ACPI_DUMP,
-    )?;
+    fs_err::write(build_ctx.path().join("Dockerfile.qemu-acpi-dump"), DOCKERFILE_QEMU_ACPI_DUMP)?;
+    fs_err::write(build_ctx.path().join("entrypoint.sh"), ENTRYPOINT_SH)?;
     build_docker_image(build_ctx.path(), distribution, &pkg, acpi_tables_name)?;
 
     // Bind-mounted output dir must be writable by the container's non-root `qemu-user`.

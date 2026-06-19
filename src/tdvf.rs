@@ -267,33 +267,55 @@ impl<'a> Tdvf<'a> {
         // Calculate measurement of the Configuration Firmware Volume (CFV)
         let cfv_hash = self.measure_cfv().context("Failed to find CFV section")?;
 
-        // Build ACPI tables
+        // Build ACPI tables (also auto-generates NVRAM for indirect boot when
+        // create_acpi_table is set).
         let tables = machine.build_tables()?;
         let acpi_tables_hash = measure_sha384(&tables.tables);
         let acpi_rsdp_hash = measure_sha384(&tables.rsdp);
         let acpi_loader_hash = measure_sha384(&tables.loader);
 
-        // Load boot order data and entries
-        let (boot_order_data, boot_entries) = parse_boot_order(machine)?;
+        // Resolve NVRAM: user-supplied path takes priority, then auto-generated.
+        let effective_nvram: Option<&str> = machine.nvram
+            .or(tables.generated_nvram.as_deref());
 
-        // Firmware order: BootMenu → bootorder → EFI vars → separator → ACPI
+        // Load BootOrder and Boot{XXXX} entries from the best available source:
+        //   1. NVRAM (OVMF_VARS.fd) — most accurate for indirect boot
+        //   2. Direct-boot hardcoded values
+        //   3. File-based fallback (legacy path_boot_xxxx directory)
+        let (boot_order_data, boot_entry_data): (Vec<u8>, Vec<Vec<u8>>) =
+            if let Some(nvram_path) = effective_nvram {
+                let (order, entries_map) =
+                    crate::nvram::read_boot_variables(nvram_path)?;
+                let entries = order
+                    .chunks(2)
+                    .filter_map(|c| {
+                        let num = u16::from_le_bytes([c[0], c[1]]);
+                        entries_map.get(&num).cloned()
+                    })
+                    .collect();
+                (order, entries)
+            } else if machine.direct_boot {
+                let boot0000_hex = "090100002c0055006900410070007000000004071400c9bdb87cebf8344faaea3ee4af6516a10406140021aa2c4614760345836e8ab6f46623317fff0400";
+                let boot0000 =
+                    hex::decode(boot0000_hex).context("Failed to decode boot0000 hex")?;
+                (vec![0x00, 0x00], vec![boot0000])
+            } else {
+                let (order, entry_nums) = parse_boot_order(machine)?;
+                let entries = entry_nums
+                    .iter()
+                    .filter_map(|&n| load_boot_variable_if_exists(n, machine).ok().flatten())
+                    .collect();
+                (order, entries)
+            };
+
+        // Firmware measurement order (EV_PLATFORM_CONFIG_FLAGS via QEMU FW CFG):
+        //   1. BootMenu  = SHA384(BootOrder EFI variable)
+        //   2. bootorder = SHA384(Boot{XXXX} EFI variable) for each entry
         let mut rtmr0_log = vec![td_hob_hash, cfv_hash];
-
-        // Boot menu entries (BootXXXX) come before EFI variable measurements
-        if machine.direct_boot {
-            let boot0000_hex = "090100002c0055006900410070007000000004071400c9bdb87cebf8344faaea3ee4af6516a10406140021aa2c4614760345836e8ab6f46623317fff0400";
-            let boot0000 = hex::decode(boot0000_hex).context("Failed to decode boot0000 hex string")?;
-            rtmr0_log.push(measure_sha384(&boot0000));
-        } else {
-            for boot_entry_num in boot_entries {
-                if let Some(boot_data) = load_boot_variable_if_exists(boot_entry_num, machine)? {
-                    rtmr0_log.push(measure_sha384(&boot_data));
-                }
-            }
+        rtmr0_log.push(measure_sha384(&boot_order_data)); // [2] BootMenu
+        for entry in &boot_entry_data {
+            rtmr0_log.push(measure_sha384(entry)); // [3+] bootorder entries
         }
-
-        // bootorder comes after BootMenu but before EFI variables
-        rtmr0_log.push(measure_sha384(&boot_order_data));
 
         rtmr0_log.extend(vec![
             measure_tdx_efi_variable("8BE4DF61-93CA-11D2-AA0D-00E098032B8C", "SecureBoot", None)?,
@@ -307,10 +329,7 @@ impl<'a> Tdvf<'a> {
             acpi_tables_hash,
         ]);
 
-        // EV_EFI_HANDOFF_TABLES: OVMF measures all EFI config-table GPAs in one call
-        // (ACPI RSDP, SMBIOS, …).  Those GPAs come from OVMF's runtime allocator and
-        // cannot be derived offline.  Supply the raw 48-byte digest read from the
-        // running VM's tdeventlog (EV_EFI_HANDOFF_TABLES entry in RTMR 0).
+        // EV_EFI_HANDOFF_TABLES: GPA-dependent, cannot be derived offline.
         if let Some(digest) = &machine.handoff_tables_digest {
             rtmr0_log.push(digest.clone());
         }

@@ -9,7 +9,7 @@ FROM ${DISTRIBUTION}
 #   "main" -> pull-lp-source from the distribution's main archive
 ARG QEMU_SOURCE=ppa
 ARG QEMU_VERSION=
-ARG ACPI_TABLES_NAME
+ARG ACPI_TABLES_NAME=acpi_tables.bin
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -44,19 +44,17 @@ WORKDIR /qemu-source
 
 USER qemu-user
 
-# Patch QEMU source to dump ACPI tables: inject code to write ACPI tables to /output/, force EOI intercept to 1, and skip pc-bios/tests builds
-ARG acpi_tables_dump_loc='\n\n    int fd = open("\/output\/'"${ACPI_TABLES_NAME}"'", O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);\n    if(fd != -1) {\n        int ret = write(fd, (uint8_t *)tables.table_data->data, tables.table_data->len);\n        if (ret < tables.table_data->len) {\n            printf("Error: Failed to write the acpi tables\\n");\n        } else {\n            printf("Successfully wrote the acpi tables to the file \\"'"${ACPI_TABLES_NAME}"'\\"\\n");\n        }\n    } else {\n        printf("Error: Failed to create acpi_tables file.\\n");\n    }\n    exit(0);'
-ARG acpi_build_c="hw/i386/acpi-build.c"
-ARG acpi_common_c="hw/i386/acpi-common.c"
+# Disable pc-bios and tests subdirs before any build — this applies to both
+# the unpatched and patched QEMU builds.  pc-bios roughly doubles image size
+# and the option ROMs are not needed; tests require extra deps not installed here.
+# The subdir('tests') reference moved inside an `if want_tools` block in QEMU 10.x
+# and is now indented; match optional leading whitespace so both layouts are handled.
 ARG meson_build="meson.build"
+RUN perl -i -pe "s/^(\s*)(subdir\('pc-bios'\)|subdir\('tests'\))/\$1# \$2/g" "$meson_build"
 
-# The subdir('tests') reference moved inside an `if want_tools` block in QEMU 10.x and is now indented;
-# match optional leading whitespace so both layouts get commented out alongside subdir('pc-bios').
-RUN perl -i -0pe 's/(acpi_build_update\(void \*build_opaque\)[\s\S]*?acpi_build\([^;]*;)/\1'"$acpi_tables_dump_loc"'/gs' "$acpi_build_c" && \
-    perl -i -pe 's/x86ms->eoi_intercept_unsupported;/1;/g' "$acpi_build_c" "$acpi_common_c" && \
-    perl -i -pe "s/^(\s*)(subdir\('pc-bios'\)|subdir\('tests'\))/\$1# \$2/g" "$meson_build"
-
-# Configure QEMU with minimal features to reduce build time and image size - only KVM acceleration is needed for ACPI table generation
+# Configure QEMU with minimal features to reduce build time and image size.
+# KVM is enabled; TCG is left enabled (default) so the unpatched binary can
+# fall back to software emulation when /dev/kvm is unavailable.
 RUN ./configure \
     --disable-bsd-user \
     --disable-guest-agent \
@@ -106,10 +104,32 @@ RUN ./configure \
     --disable-tools \
     --target-list=x86_64-softmmu
 
+# Build 1: unpatched QEMU — used for NVRAM generation (boots OVMF without any hooks).
+RUN make -j$(nproc)
+RUN cp build/qemu-system-x86_64 build/qemu-system-x86_64-unpatched
+
+# Patch QEMU source to dump ACPI tables: inject code to write ACPI tables to
+# /output/, force EOI intercept to 1.  pc-bios/tests already disabled above.
+ARG acpi_tables_dump_loc='\n\n    int fd = open("\/output\/'"${ACPI_TABLES_NAME}"'", O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);\n    if(fd != -1) {\n        int ret = write(fd, (uint8_t *)tables.table_data->data, tables.table_data->len);\n        if (ret < tables.table_data->len) {\n            printf("Error: Failed to write the acpi tables\\n");\n        } else {\n            printf("Successfully wrote the acpi tables to the file \\"'"${ACPI_TABLES_NAME}"'\\"\\n");\n        }\n    } else {\n        printf("Error: Failed to create acpi_tables file.\\n");\n    }\n    exit(0);'
+ARG acpi_build_c="hw/i386/acpi-build.c"
+ARG acpi_common_c="hw/i386/acpi-common.c"
+
+RUN perl -i -0pe 's/(acpi_build_update\(void \*build_opaque\)[\s\S]*?acpi_build\([^;]*;)/\1'"$acpi_tables_dump_loc"'/gs' "$acpi_build_c" && \
+    perl -i -pe 's/x86ms->eoi_intercept_unsupported;/1;/g' "$acpi_build_c" "$acpi_common_c"
+
+# Build 2: patched QEMU — incremental rebuild, only patched files recompile.
 RUN make -j$(nproc)
 
-# Add health check for container monitoring
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD ["build/qemu-system-x86_64", "--version"]
+# Install OVMF for the split CODE/VARS pflash files used in nvram mode.
+# The unpatched QEMU binary is already in the image; no apt QEMU needed.
+USER root
+RUN apt-get update && \
+    apt-get install --no-install-recommends --yes ovmf && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-ENTRYPOINT ["build/qemu-system-x86_64"]
+# Entrypoint routes to patched QEMU (default) or unpatched QEMU+OVMF (nvram mode).
+# Both binaries are built from the same pinned source version.
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

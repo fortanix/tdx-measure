@@ -77,6 +77,9 @@ struct PathStorage {
     mok_list_trusted: Option<String>,
     mok_list_x: Option<String>,
     sbat_level: Option<String>,
+    /// User-supplied OVMF NVRAM path; if None and create_acpi_table is set,
+    /// NVRAM is auto-generated during measurement.
+    nvram: Option<String>,
 }
 
 impl PathResolver {
@@ -102,6 +105,7 @@ impl PathResolver {
                 mok_list_trusted: image_config.indirect_boot().map(|i| parent_dir.join(&i.mok_list_trusted).display().to_string()),
                 mok_list_x: image_config.indirect_boot().map(|i| parent_dir.join(&i.mok_list_x).display().to_string()),
                 sbat_level: image_config.indirect_boot().map(|i| parent_dir.join(&i.sbat_level).display().to_string()),
+                nvram: boot_config.nvram.as_ref().map(|p| parent_dir.join(p).display().to_string()),
             }
         } else {
             // When boot_config is None (runtime-only mode), provide empty strings for platform fields
@@ -125,6 +129,7 @@ impl PathResolver {
                 mok_list_trusted: image_config.indirect_boot().map(|i| parent_dir.join(&i.mok_list_trusted).display().to_string()),
                 mok_list_x: image_config.indirect_boot().map(|i| parent_dir.join(&i.mok_list_x).display().to_string()),
                 sbat_level: image_config.indirect_boot().map(|i| parent_dir.join(&i.sbat_level).display().to_string()),
+                nvram: None,
             }
         };
 
@@ -161,6 +166,7 @@ impl PathResolver {
             .create_acpi_table(create_acpi_table)
             .distribution(distribution)
             .maybe_qemu_version(qemu_version)
+            .maybe_nvram(self.paths.nvram.as_deref())
             .build()
     }
 }
@@ -196,12 +202,9 @@ fn process_measurements(config: &Cli, image_config: &ImageConfig) -> Result<()> 
     };
     let mut error_msgs = String::new();
 
-    // Check usage of --create-acpi-tables flag
-    if create_acpi_table {
-        if !direct_boot {
-            error_msgs.push_str("--create-acpi-tables is not valid with indirect boot\n");
-        }
-    }
+    // --create-acpi-tables: for direct boot → generates ACPI tables;
+    //                        for indirect boot → generates NVRAM (Boot0000/BootOrder)
+    // Both modes use the same Docker image and distribution argument.
 
     // Check usage of ACPI table path
     if !config.runtime_only {
