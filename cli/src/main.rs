@@ -51,6 +51,14 @@ struct Cli {
     /// `pull-lp-source`'s current main-archive pick.
     #[arg(long, num_args = 1..=2, value_names = ["DISTRIBUTION", "QEMU_VERSION"])]
     create_acpi_tables: Option<Vec<String>>,
+
+    /// SHA-384 digest (96 hex chars) of the EV_EFI_HANDOFF_TABLES event in
+    /// RTMR0. OVMF measures the EFI configuration table array at GPAs assigned
+    /// by its runtime allocator, so this value cannot be derived offline.
+    /// Read it from `tdeventlog` (the EV_EFI_HANDOFF_TABLES entry in RTMR 0)
+    /// and pass it here to reproduce a complete RTMR0.
+    #[arg(long, value_name = "HEX")]
+    handoff_tables_digest: Option<String>,
 }
 
 /// Helper struct to resolve and store file paths
@@ -143,6 +151,7 @@ impl PathResolver {
         create_acpi_table: bool,
         distribution: &'a str,
         qemu_version: Option<&'a str>,
+        handoff_tables_digest: Option<Vec<u8>>,
     ) -> Machine<'a> {
         Machine::builder()
             .cpu_count(self.paths.cpu_count)
@@ -167,6 +176,7 @@ impl PathResolver {
             .distribution(distribution)
             .maybe_qemu_version(qemu_version)
             .maybe_nvram(self.paths.nvram.as_deref())
+            .maybe_handoff_tables_digest(handoff_tables_digest)
             .build()
     }
 }
@@ -223,12 +233,28 @@ fn process_measurements(config: &Cli, image_config: &ImageConfig) -> Result<()> 
         return Err(anyhow!(error_msgs.trim_end().to_owned()));
     }
 
+    let handoff_tables_digest = match &config.handoff_tables_digest {
+        Some(hex_str) => {
+            let bytes = hex::decode(hex_str.trim())
+                .context("Failed to decode --handoff-tables-digest as hex")?;
+            if bytes.len() != 48 {
+                return Err(anyhow!(
+                    "--handoff-tables-digest must be a SHA-384 digest (48 bytes / 96 hex chars), got {} bytes",
+                    bytes.len()
+                ));
+            }
+            Some(bytes)
+        }
+        None => None,
+    };
+
     let machine = path_resolver.build_machine(
         direct_boot,
         &config.metadata,
         create_acpi_table,
         distribution,
         qemu_version,
+        handoff_tables_digest,
     );
 
     // Measure

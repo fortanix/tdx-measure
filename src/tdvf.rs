@@ -308,6 +308,21 @@ impl<'a> Tdvf<'a> {
                 (order, entries)
             };
 
+        // Debug: dump the exact bytes that get measured so a mismatch against
+        // tdeventlog can be diagnosed (e.g. a Boot0000 device-path difference).
+        log::debug!(
+            "RTMR0 BootOrder ({} bytes): {}",
+            boot_order_data.len(),
+            hex::encode(&boot_order_data)
+        );
+        for (i, entry) in boot_entry_data.iter().enumerate() {
+            log::debug!(
+                "RTMR0 boot entry [{i}] ({} bytes): {}",
+                entry.len(),
+                hex::encode(entry)
+            );
+        }
+
         // Firmware measurement order (EV_PLATFORM_CONFIG_FLAGS via QEMU FW CFG):
         //   1. BootMenu  = SHA384(BootOrder EFI variable)
         //   2. bootorder = SHA384(Boot{XXXX} EFI variable) for each entry
