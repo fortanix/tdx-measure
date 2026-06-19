@@ -84,6 +84,36 @@ fn measure_tdx_efi_variable(vendor_guid: &str, var_name: &str, var_data: Option<
     Ok(measure_sha384(&data))
 }
 
+/// Returns the contents of QEMU's `etc/boot-menu-wait` fw_cfg file, which TDVF
+/// measures into RTMR0 as the "BootMenu" event.  It is a little-endian UINT16
+/// holding the interactive boot-menu timeout; with no `-boot menu=on` on the
+/// QEMU command line the menu is disabled and the value is 0.
+fn boot_menu_wait_fw_cfg(_machine: &Machine) -> Vec<u8> {
+    vec![0x00, 0x00]
+}
+
+/// Returns the contents of QEMU's `bootorder` fw_cfg file, which TDVF measures
+/// into RTMR0 as the "bootorder" event.  This is the output of QEMU's
+/// `get_boot_devices_list()`: the OFW path of each device with a `bootindex`,
+/// separated by newlines, with the whole buffer NUL-terminated.
+///
+/// For direct boot (`-kernel`), QEMU registers the `linuxboot_dma.bin` option
+/// ROM at bootindex 0, so the file holds exactly that ROM's OFW path.
+fn bootorder_fw_cfg(machine: &Machine) -> Result<Vec<u8>> {
+    if machine.direct_boot {
+        let mut v = b"/rom@genroms/linuxboot_dma.bin".to_vec();
+        v.push(0x00); // get_boot_devices_list() NUL-terminates the buffer
+        Ok(v)
+    } else {
+        // Indirect boot: the bootorder file holds the boot disk's OFW device
+        // path. Deriving it offline requires modelling the PCI topology; until
+        // that is implemented, fall back to the legacy boot_order file so the
+        // existing indirect flow keeps producing a value.
+        let (order, _) = parse_boot_order(machine)?;
+        Ok(order)
+    }
+}
+
 /// Loads boot order data and parses boot entry numbers based on boot mode.
 /// For direct boot, returns a simulated boot order with no boot entries.
 /// For indirect boot, reads the boot order file and extracts the list of boot entry numbers.
@@ -109,19 +139,6 @@ fn parse_boot_order(machine: &Machine) -> Result<(Vec<u8>, Vec<u16>)> {
         Ok((boot_order_data, boot_entries))
     } else {
         Err(anyhow!("Boot order file is required for indirect boot"))
-    }
-}
-
-/// Loads boot variable data if the corresponding file exists
-fn load_boot_variable_if_exists(boot_entry_num: u16, machine: &Machine) -> Result<Option<Vec<u8>>> {
-    let filename = format!("{}/Boot{:04X}.bin", machine.path_boot_xxxx, boot_entry_num);
-    // Try to read the file, return None if it doesn't exist
-    match read_file_data(&filename) {
-        Ok(data) => Ok(Some(data)),
-        Err(_) => {
-            // File doesn't exist or can't be read, skip this boot entry
-            Ok(None)
-        }
     }
 }
 
@@ -267,70 +284,36 @@ impl<'a> Tdvf<'a> {
         // Calculate measurement of the Configuration Firmware Volume (CFV)
         let cfv_hash = self.measure_cfv().context("Failed to find CFV section")?;
 
-        // Build ACPI tables (also auto-generates NVRAM for indirect boot when
+        // Build ACPI tables (auto-generates them for direct boot when
         // create_acpi_table is set).
         let tables = machine.build_tables()?;
         let acpi_tables_hash = measure_sha384(&tables.tables);
         let acpi_rsdp_hash = measure_sha384(&tables.rsdp);
         let acpi_loader_hash = measure_sha384(&tables.loader);
 
-        // Resolve NVRAM: user-supplied path takes priority, then auto-generated.
-        let effective_nvram: Option<&str> = machine.nvram
-            .or(tables.generated_nvram.as_deref());
+        // RTMR0 events [2] and [3] are EV_PLATFORM_CONFIG_FLAGS measurements of
+        // QEMU `fw_cfg` file *contents* (event signature "QEMU FW CFG"), NOT EFI
+        // boot variables.  Both are determined purely by the QEMU command line,
+        // so they reproduce offline without booting OVMF or reading NVRAM:
+        //   [2] "BootMenu"  = SHA384(etc/boot-menu-wait)  — UINT16 menu timeout
+        //   [3] "bootorder" = SHA384(bootorder fw_cfg)    — get_boot_devices_list()
+        let boot_menu_wait = boot_menu_wait_fw_cfg(machine);
+        let bootorder = bootorder_fw_cfg(machine)?;
 
-        // Load BootOrder and Boot{XXXX} entries from the best available source:
-        //   1. NVRAM (OVMF_VARS.fd) — most accurate for indirect boot
-        //   2. Direct-boot hardcoded values
-        //   3. File-based fallback (legacy path_boot_xxxx directory)
-        let (boot_order_data, boot_entry_data): (Vec<u8>, Vec<Vec<u8>>) =
-            if let Some(nvram_path) = effective_nvram {
-                let (order, entries_map) =
-                    crate::nvram::read_boot_variables(nvram_path)?;
-                let entries = order
-                    .chunks(2)
-                    .filter_map(|c| {
-                        let num = u16::from_le_bytes([c[0], c[1]]);
-                        entries_map.get(&num).cloned()
-                    })
-                    .collect();
-                (order, entries)
-            } else if machine.direct_boot {
-                let boot0000_hex = "090100002c0055006900410070007000000004071400c9bdb87cebf8344faaea3ee4af6516a10406140021aa2c4614760345836e8ab6f46623317fff0400";
-                let boot0000 =
-                    hex::decode(boot0000_hex).context("Failed to decode boot0000 hex")?;
-                (vec![0x00, 0x00], vec![boot0000])
-            } else {
-                let (order, entry_nums) = parse_boot_order(machine)?;
-                let entries = entry_nums
-                    .iter()
-                    .filter_map(|&n| load_boot_variable_if_exists(n, machine).ok().flatten())
-                    .collect();
-                (order, entries)
-            };
-
-        // Debug: dump the exact bytes that get measured so a mismatch against
-        // tdeventlog can be diagnosed (e.g. a Boot0000 device-path difference).
         log::debug!(
-            "RTMR0 BootOrder ({} bytes): {}",
-            boot_order_data.len(),
-            hex::encode(&boot_order_data)
+            "RTMR0 etc/boot-menu-wait ({} bytes): {}",
+            boot_menu_wait.len(),
+            hex::encode(&boot_menu_wait)
         );
-        for (i, entry) in boot_entry_data.iter().enumerate() {
-            log::debug!(
-                "RTMR0 boot entry [{i}] ({} bytes): {}",
-                entry.len(),
-                hex::encode(entry)
-            );
-        }
+        log::debug!(
+            "RTMR0 bootorder fw_cfg ({} bytes): {}",
+            bootorder.len(),
+            hex::encode(&bootorder)
+        );
 
-        // Firmware measurement order (EV_PLATFORM_CONFIG_FLAGS via QEMU FW CFG):
-        //   1. BootMenu  = SHA384(BootOrder EFI variable)
-        //   2. bootorder = SHA384(Boot{XXXX} EFI variable) for each entry
         let mut rtmr0_log = vec![td_hob_hash, cfv_hash];
-        rtmr0_log.push(measure_sha384(&boot_order_data)); // [2] BootMenu
-        for entry in &boot_entry_data {
-            rtmr0_log.push(measure_sha384(entry)); // [3+] bootorder entries
-        }
+        rtmr0_log.push(measure_sha384(&boot_menu_wait)); // [2] "BootMenu"
+        rtmr0_log.push(measure_sha384(&bootorder));      // [3] "bootorder"
 
         rtmr0_log.extend(vec![
             measure_tdx_efi_variable("8BE4DF61-93CA-11D2-AA0D-00E098032B8C", "SecureBoot", None)?,

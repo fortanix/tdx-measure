@@ -42,16 +42,6 @@ pub struct Machine<'a> {
     /// offline.  Read it once from `tdeventlog` (look for EV_EFI_HANDOFF_TABLES in
     /// RTMR 0) and supply it here to reproduce a full RTMR0 measurement.
     pub handoff_tables_digest: Option<Vec<u8>>,
-
-    /// Path to a writable OVMF NVRAM pflash image (OVMF_VARS.fd) that has
-    /// been populated by at least one OVMF boot with the target disk attached.
-    ///
-    /// When set, Boot0000 and BootOrder are read directly from the NVRAM file
-    /// instead of from `path_boot_xxxx`/`boot_order` files.  This is the
-    /// preferred source for indirect-boot measurements because it captures
-    /// the exact EFI device path (including the disk's GPT partition GUID)
-    /// that the firmware actually measured.
-    pub nvram: Option<&'a str>,
 }
 
 impl Machine<'_> {

@@ -42,8 +42,9 @@ pub(crate) fn measure_rtmr2_direct(
     // Reads our initrd file
     let initrd_data = fs::read(initrd_path).context("Failed to read initrd file")?;
 
-    // OVFM adds initrd to the command line
-    let cmdline = kernel_cmdline.to_string() + " initrd=initrd";
+    // OVMF prepends `initrd=initrd ` to the kernel command line so the EFI stub
+    // loads the fw_cfg initrd; this matches the guest's /proc/cmdline ordering.
+    let cmdline = format!("initrd=initrd {kernel_cmdline}");
 
     // Compute RTMR2 log
     let rtmr2_log = vec![

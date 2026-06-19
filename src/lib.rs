@@ -17,7 +17,6 @@ mod kernel;
 mod image;
 mod machine;
 mod num;
-pub mod nvram;
 mod tdvf;
 mod util;
 
@@ -49,11 +48,6 @@ pub struct BootConfig {
     pub table_loader: Option<String>,
     pub boot_order: Option<String>,
     pub path_boot_xxxx: Option<String>,
-    /// Path to a writable OVMF NVRAM pflash image (OVMF_VARS.fd) that has
-    /// been populated by at least one OVMF boot with the target disk attached.
-    /// When present, Boot0000 / BootOrder are read from here instead of from
-    /// boot_order / path_boot_xxxx.
-    pub nvram: Option<String>,
     pub qemu: Option<QemuShape>,
 }
 
