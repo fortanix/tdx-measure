@@ -105,10 +105,7 @@ pub(crate) fn measure_rtmr1_direct(
     let initrd_data = fs::read(initrd_path).context("Failed to read initrd file")?;
     let initrd_size = initrd_data.len() as u32;
 
-    // Patch kernel to mimic QEMU's behavior
-    let kd = patch_kernel(&kernel_data, initrd_size, mem_size, acpi_data_size)
-        .context("Failed to patch kernel")?;
-    let kernel_hash = authenticode_sha384_hash(&kd).context("Failed to compute kernel hash")?;
+    let kernel_hash = authenticode_sha384_hash(&kernel_data).context("Failed to compute kernel hash")?;
 
     // Compute RTMR1 log
     let rtmr1_log = vec![
