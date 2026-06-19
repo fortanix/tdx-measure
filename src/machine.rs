@@ -34,6 +34,14 @@ pub struct Machine<'a> {
     pub create_acpi_table: bool,
     pub distribution: &'a str,
     pub qemu_version: Option<&'a str>,
+    /// SHA-384 digest of the EV_EFI_HANDOFF_TABLES event (48 bytes).
+    ///
+    /// OVMF measures the entire EFI configuration table array (ACPI RSDP, SMBIOS, …)
+    /// in one call, but only logs the SMBIOS entry.  Because the GPA of every table is
+    /// assigned by OVMF's runtime allocator at boot, this value cannot be derived
+    /// offline.  Read it once from `tdeventlog` (look for EV_EFI_HANDOFF_TABLES in
+    /// RTMR 0) and supply it here to reproduce a full RTMR0 measurement.
+    pub handoff_tables_digest: Option<Vec<u8>>,
 }
 
 impl Machine<'_> {

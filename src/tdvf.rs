@@ -276,24 +276,11 @@ impl<'a> Tdvf<'a> {
         // Load boot order data and entries
         let (boot_order_data, boot_entries) = parse_boot_order(machine)?;
 
-        // Compute RTMR0 log
-        let mut rtmr0_log = vec![
-            td_hob_hash,
-            cfv_hash,
-            measure_tdx_efi_variable("8BE4DF61-93CA-11D2-AA0D-00E098032B8C", "SecureBoot", None)?,
-            measure_tdx_efi_variable("8BE4DF61-93CA-11D2-AA0D-00E098032B8C", "PK", None)?,
-            measure_tdx_efi_variable("8BE4DF61-93CA-11D2-AA0D-00E098032B8C", "KEK", None)?,
-            measure_tdx_efi_variable("D719B2CB-3D3A-4596-A3BC-DAD00E67656F", "db", None)?,
-            measure_tdx_efi_variable("D719B2CB-3D3A-4596-A3BC-DAD00E67656F", "dbx", None)?,
-            measure_sha384(&[0x00, 0x00, 0x00, 0x00]), // Separator
-            acpi_loader_hash,
-            acpi_rsdp_hash,
-            acpi_tables_hash,
-            measure_sha384(&boot_order_data), // Always measure BootOrder itself
-        ];
+        // Firmware order: BootMenu → bootorder → EFI vars → separator → ACPI
+        let mut rtmr0_log = vec![td_hob_hash, cfv_hash];
 
+        // Boot menu entries (BootXXXX) come before EFI variable measurements
         if machine.direct_boot {
-            // Boot0000 data for direct boot mode
             let boot0000_hex = "090100002c0055006900410070007000000004071400c9bdb87cebf8344faaea3ee4af6516a10406140021aa2c4614760345836e8ab6f46623317fff0400";
             let boot0000 = hex::decode(boot0000_hex).context("Failed to decode boot0000 hex string")?;
             rtmr0_log.push(measure_sha384(&boot0000));
@@ -305,9 +292,27 @@ impl<'a> Tdvf<'a> {
             }
         }
 
-        // Add SbatLevel if not direct boot
-        if !machine.direct_boot {
-            rtmr0_log.push(measure_tdx_efi_variable("605DAB50-E046-4300-ABB6-3DD810DD8B23", "SbatLevel", Some(b"sbat,1,2021030218\n"))?);
+        // bootorder comes after BootMenu but before EFI variables
+        rtmr0_log.push(measure_sha384(&boot_order_data));
+
+        rtmr0_log.extend(vec![
+            measure_tdx_efi_variable("8BE4DF61-93CA-11D2-AA0D-00E098032B8C", "SecureBoot", None)?,
+            measure_tdx_efi_variable("8BE4DF61-93CA-11D2-AA0D-00E098032B8C", "PK", None)?,
+            measure_tdx_efi_variable("8BE4DF61-93CA-11D2-AA0D-00E098032B8C", "KEK", None)?,
+            measure_tdx_efi_variable("D719B2CB-3D3A-4596-A3BC-DAD00E67656F", "db", None)?,
+            measure_tdx_efi_variable("D719B2CB-3D3A-4596-A3BC-DAD00E67656F", "dbx", None)?,
+            measure_sha384(&[0x00, 0x00, 0x00, 0x00]), // Separator
+            acpi_loader_hash,
+            acpi_rsdp_hash,
+            acpi_tables_hash,
+        ]);
+
+        // EV_EFI_HANDOFF_TABLES: OVMF measures all EFI config-table GPAs in one call
+        // (ACPI RSDP, SMBIOS, …).  Those GPAs come from OVMF's runtime allocator and
+        // cannot be derived offline.  Supply the raw 48-byte digest read from the
+        // running VM's tdeventlog (EV_EFI_HANDOFF_TABLES entry in RTMR 0).
+        if let Some(digest) = &machine.handoff_tables_digest {
+            rtmr0_log.push(digest.clone());
         }
 
         debug_print_log("RTMR0", &rtmr0_log);
