@@ -12,7 +12,13 @@
 # The unpatched QEMU is given 120 seconds; timeout is expected and exits cleanly.
 if [ "$1" = "nvram" ]; then
     shift
-    cp /usr/share/OVMF/OVMF_VARS.fd /output/OVMF_VARS.fd
+    # For indirect boot, Rust does not pre-stage OVMF_VARS.fd, so copy the
+    # apt template as the starting state.  For direct boot, Rust pre-stages
+    # the user's actual VARS region so OVMF boots with the right initial state;
+    # do NOT overwrite it in that case.
+    if [ ! -f /output/OVMF_VARS.fd ]; then
+        cp /usr/share/OVMF/OVMF_VARS.fd /output/OVMF_VARS.fd
+    fi
     timeout 120 /qemu-source/build/qemu-system-x86_64-unpatched "$@"
     exit 0
 else

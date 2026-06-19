@@ -38,25 +38,20 @@ pub struct Tables {
 
 impl Machine<'_> {
     pub fn build_tables(&self) -> Result<Tables> {
-        // Auto-generate ACPI tables (direct boot) or NVRAM (indirect boot).
+        // Auto-generate ACPI tables (direct boot) and/or NVRAM (both modes).
         let generated_nvram: Option<String> = if self.create_acpi_table {
             if self.direct_boot {
                 generate_acpi_tables(self.metadata_path, self.distribution, self.qemu_version)?;
-                None
-            } else if let Some(qcow2) = self.qcow2.filter(|p| !p.is_empty()) {
-                // For indirect boot, generate the NVRAM so rtmr0() can read
-                // the correct Boot0000 / BootOrder EFI variables.
-                let nvram_path = generate_nvram(
-                    self.metadata_path,
-                    self.distribution,
-                    self.qemu_version,
-                    qcow2,
-                    self.nvram,
-                )?;
-                Some(nvram_path)
-            } else {
-                None
             }
+            // Generate NVRAM for both boot modes so rtmr0() gets the exact
+            // Boot0000 / BootOrder written by the user's OVMF version.
+            let nvram_path = generate_nvram(
+                self.metadata_path,
+                self.distribution,
+                self.qemu_version,
+                self.nvram,
+            )?;
+            Some(nvram_path)
         } else {
             None
         };
@@ -568,25 +563,82 @@ fn find_drive_id(devices: &[String]) -> Option<String> {
     None
 }
 
+/// Return the size in bytes of the VARS firmware volume at the start of a
+/// combined OVMF image by reading `FvLength` from the EFI_FIRMWARE_VOLUME_HEADER.
+fn ovmf_vars_region_size(ovmf: &[u8]) -> Result<usize> {
+    if ovmf.len() < 48 {
+        bail!("OVMF image too small to contain a firmware volume header");
+    }
+    if &ovmf[40..44] != b"_FVH" {
+        bail!("OVMF image does not start with a valid firmware volume (missing _FVH signature at offset 40)");
+    }
+    let fv_length = u64::from_le_bytes(ovmf[32..40].try_into().unwrap()) as usize;
+    if fv_length == 0 || fv_length >= ovmf.len() {
+        bail!("Invalid VARS firmware volume length in OVMF image: {fv_length:#x} (image size {:#x})", ovmf.len());
+    }
+    Ok(fv_length)
+}
+
+/// Split a combined OVMF.fd into the VARS region and the CODE region.
+///
+/// The VARS region (bytes `[0..vars_size]`) is written to `output_dir/OVMF_VARS.fd`
+/// so the container finds it at `/output/OVMF_VARS.fd` as the initial writable pflash.
+/// The CODE region (bytes `[vars_size..]`) is written to `staging_dir/OVMF_CODE.fd`
+/// for bind-mounting into the container as `/input/OVMF_CODE.fd` (readonly pflash 0).
+fn stage_ovmf_for_nvram(ovmf_path: &Path, output_dir: &Path, staging_dir: &Path) -> Result<()> {
+    let ovmf = fs_err::read(ovmf_path)
+        .with_context(|| format!("Failed to read OVMF image: {}", ovmf_path.display()))?;
+    let vars_size = ovmf_vars_region_size(&ovmf)?;
+    let code_region = &ovmf[vars_size..];
+    if code_region.is_empty() {
+        bail!("OVMF image has no CODE region after VARS (image may already be VARS-only)");
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let vars_out = output_dir.join(NVRAM_OUT);
+    fs_err::write(&vars_out, &ovmf[..vars_size])?;
+    // Must be world-writable so the container's qemu-user can modify it as pflash 1.
+    fs_err::set_permissions(&vars_out, std::fs::Permissions::from_mode(0o666))?;
+    fs_err::write(staging_dir.join("OVMF_CODE.fd"), code_region)?;
+    Ok(())
+}
+
 /// Build the QEMU command-line args for an unpatched OVMF boot used to
-/// populate NVRAM.  Stock QEMU inside the container runs with the container's
-/// built-in OVMF (from the `ovmf` apt package) in split pflash mode.
+/// populate NVRAM.
+///
+/// For direct boot, uses the user's OVMF split into CODE (readonly pflash 0
+/// at `/input/OVMF_CODE.fd`) and VARS (writable pflash 1 pre-staged at
+/// `/output/OVMF_VARS.fd`), plus FW_CFG `-kernel`/`-initrd` so OVMF's BDS
+/// creates the exact same Boot0000 as the production TDX VM.
+///
+/// For indirect boot, uses the stock apt OVMF + the user's qcow2 disk.
 ///
 /// The QEMU args are prefixed by the "nvram" sentinel consumed by the
 /// container's entrypoint script.
-fn build_nvram_qemu_args(qemu: Option<&QemuShape>, memory: &str, use_kvm: bool) -> Vec<OsString> {
+fn build_nvram_qemu_args(
+    qemu: Option<&QemuShape>,
+    memory: &str,
+    use_kvm: bool,
+    is_direct_boot: bool,
+    cmdline: &str,
+) -> Vec<OsString> {
     let mut args: Vec<OsString> = Vec::new();
     let push = |args: &mut Vec<OsString>, k: &str, v: &str| {
         args.push(k.into());
         args.push(v.into());
     };
 
-    // "nvram" is consumed by /entrypoint.sh to select the stock-QEMU path.
+    // "nvram" is consumed by /entrypoint.sh to select the unpatched-QEMU path.
     args.push("nvram".into());
 
-    // Stock OVMF in split pflash mode (paths inside the container from `ovmf` package)
-    push(&mut args, "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd");
-    push(&mut args, "-drive", "if=pflash,format=raw,file=/output/OVMF_VARS.fd");
+    if is_direct_boot {
+        // User's OVMF split by Rust into CODE (readonly) and VARS (pre-staged writable).
+        push(&mut args, "-drive", "if=pflash,format=raw,readonly=on,file=/input/OVMF_CODE.fd");
+        push(&mut args, "-drive", "if=pflash,format=raw,file=/output/OVMF_VARS.fd");
+    } else {
+        // Stock apt OVMF in split pflash mode.
+        push(&mut args, "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd");
+        push(&mut args, "-drive", "if=pflash,format=raw,file=/output/OVMF_VARS.fd");
+    }
 
     push(&mut args, "-m", memory);
     push(&mut args, "-accel", if use_kvm { "kvm" } else { "tcg" });
@@ -596,7 +648,7 @@ fn build_nvram_qemu_args(qemu: Option<&QemuShape>, memory: &str, use_kvm: bool) 
 
     match qemu {
         Some(q) => {
-            // Strip TDX-specific and accel-incompatible machine params
+            // Strip TDX-specific and accel-incompatible machine params.
             let mut machine = strip_machine_params(&q.machine, &["confidential-guest-support"]);
             if !use_kvm {
                 machine = strip_machine_params(&machine, &["kernel-irqchip"]);
@@ -613,31 +665,49 @@ fn build_nvram_qemu_args(qemu: Option<&QemuShape>, memory: &str, use_kvm: bool) 
                 push(&mut args, "-device", dev);
             }
 
-            // Add the qcow2 disk drive, using the same drive ID that the
-            // device list references so the device path node is correct.
-            let disk_id = find_drive_id(&q.devices).unwrap_or_else(|| "disk0".to_owned());
-            push(&mut args, "-drive",
-                &format!("if=none,format=qcow2,file=/input/disk.qcow2,id={disk_id},readonly=on"));
+            if is_direct_boot {
+                // FW_CFG kernel/initrd makes OVMF create Boot0000 exactly as
+                // the production TDX VM does.  No disk needed.
+                push(&mut args, "-kernel", "/input/kernel");
+                push(&mut args, "-initrd", "/input/initrd");
+                if !cmdline.is_empty() {
+                    push(&mut args, "-append", cmdline);
+                }
+            } else {
+                // Add the qcow2 disk using the same drive ID the device list references.
+                let disk_id = find_drive_id(&q.devices).unwrap_or_else(|| "disk0".to_owned());
+                push(&mut args, "-drive",
+                    &format!("if=none,format=qcow2,file=/input/disk.qcow2,id={disk_id},readonly=on"));
+            }
         }
         None => {
-            // Minimal fallback: simple q35 with a single virtio-blk disk
+            // Minimal fallback: simple q35.
             push(&mut args, "-machine", "q35,smm=off");
             push(&mut args, "-cpu", if use_kvm { "host" } else { "qemu64" });
-            push(&mut args, "-drive", "if=none,format=qcow2,file=/input/disk.qcow2,id=disk0,readonly=on");
-            push(&mut args, "-device", "virtio-blk-pci,drive=disk0");
+            if is_direct_boot {
+                push(&mut args, "-kernel", "/input/kernel");
+                push(&mut args, "-initrd", "/input/initrd");
+                if !cmdline.is_empty() {
+                    push(&mut args, "-append", cmdline);
+                }
+            } else {
+                push(&mut args, "-drive", "if=none,format=qcow2,file=/input/disk.qcow2,id=disk0,readonly=on");
+                push(&mut args, "-device", "virtio-blk-pci,drive=disk0");
+            }
         }
     }
 
     args
 }
 
-/// Run the Docker container in nvram mode: stock QEMU boots with the user's
-/// qcow2 disk so OVMF can write Boot0000/BootOrder into the NVRAM pflash.
-/// The container is given `timeout_secs` seconds, after which QEMU is killed
-/// (timeout is expected — we just want OVMF to finish its BDS phase).
+/// Run the Docker container in nvram mode: unpatched QEMU boots with OVMF so
+/// it can write Boot0000/BootOrder into the NVRAM pflash.  `input_mounts` is a
+/// list of `(host_path, container_path)` pairs bound read-only into the
+/// container.  The container exits 0 on timeout (expected — we just need OVMF's
+/// BDS phase to complete).
 fn run_docker_nvram_container(
     output_dir: &Path,
-    qcow2: &Path,
+    input_mounts: &[(&Path, &str)],
     nvram_args: &[OsString],
     use_kvm: bool,
 ) -> Result<()> {
@@ -659,13 +729,13 @@ fn run_docker_nvram_container(
         cmd.args(["--device", "/dev/kvm:/dev/kvm"]);
     }
 
-    // qcow2 is bind-mounted read-only; output dir receives OVMF_VARS.fd
-    cmd.arg("-v").arg(format!("{}:/input/disk.qcow2:ro", qcow2.display()));
+    for (host_path, container_path) in input_mounts {
+        cmd.arg("-v").arg(format!("{}:{}:ro", host_path.display(), container_path));
+    }
     cmd.arg("-v").arg(format!("{}:/output", output_dir.display()));
     cmd.arg(IMAGE_NAME);
     cmd.args(nvram_args);
 
-    // The container exits 0 on timeout (by design in entrypoint.sh).
     let status = cmd.status().context("Failed to invoke `docker run` for nvram mode")?;
     if !status.success() {
         bail!("QEMU nvram container exited with failure (exit {status})");
@@ -673,10 +743,16 @@ fn run_docker_nvram_container(
     Ok(())
 }
 
-/// Generate a populated OVMF_VARS.fd by booting stock QEMU+OVMF with the
-/// user's qcow2 disk inside the existing Docker image.  OVMF's BDS phase
-/// writes Boot0000 / BootOrder into the writable pflash; we copy the result
-/// to `nvram_output`.
+/// Generate a populated OVMF_VARS.fd by booting unpatched QEMU+OVMF inside
+/// the existing Docker image.  OVMF's BDS phase writes Boot0000/BootOrder into
+/// the writable pflash; we copy the result to `nvram_output`.
+///
+/// Supports both boot modes:
+///   - Direct boot: splits the user's OVMF binary into CODE (readonly pflash)
+///     and VARS (pre-staged writable pflash), then passes kernel/initrd via
+///     FW_CFG so OVMF creates the same Boot0000 as the production TDX VM.
+///   - Indirect boot: uses the stock apt OVMF with the user's qcow2 disk so
+///     OVMF creates a Boot0000 containing the disk's GPT partition GUID.
 ///
 /// When `user_nvram` is `Some`, that path is used as the output destination;
 /// otherwise the NVRAM is written next to the ACPI tables as `OVMF_VARS.fd`.
@@ -684,7 +760,6 @@ pub fn generate_nvram(
     metadata_path: &Path,
     distribution: &str,
     qemu_version: Option<&str>,
-    qcow2: &str,
     user_nvram: Option<&str>,
 ) -> Result<String> {
     let pkg = qemu_pkg_for(distribution, qemu_version)?;
@@ -698,7 +773,10 @@ pub fn generate_nvram(
         .as_ref()
         .context("boot_config is required to generate NVRAM")?;
 
-    // Determine where to write the NVRAM file
+    let parent_dir = metadata_path.parent().unwrap_or(Path::new("."));
+    let is_direct_boot = image_config.is_direct_boot();
+
+    // Determine where to write the NVRAM file.
     let nvram_output: PathBuf = if let Some(p) = user_nvram {
         PathBuf::from(p)
     } else {
@@ -712,10 +790,6 @@ pub fn generate_nvram(
         fs_err::create_dir_all(parent)?;
     }
 
-    let qcow2_path = PathBuf::from(qcow2)
-        .canonicalize()
-        .with_context(|| format!("qcow2 not found: {qcow2}"))?;
-
     // Build (or reuse cached) Docker image — same image as ACPI generation.
     let acpi_tables_target = resolve_metadata_path(metadata_path, &boot_config.acpi_tables);
     let acpi_tables_name = acpi_tables_target
@@ -728,16 +802,57 @@ pub fn generate_nvram(
     fs_err::write(build_ctx.path().join("entrypoint.sh"), ENTRYPOINT_SH)?;
     build_docker_image(build_ctx.path(), distribution, &pkg, acpi_tables_name)?;
 
-    // Output dir must be world-writable so the container (non-root qemu-user) can write
+    // Output dir must be world-writable so the container's non-root qemu-user can write.
     use std::os::unix::fs::PermissionsExt;
     let output_dir = tempfile::tempdir().context("Failed to create NVRAM output dir")?;
     fs_err::set_permissions(output_dir.path(), std::fs::Permissions::from_mode(0o777))?;
 
     let use_kvm = boot_config.qemu.as_ref().map(|q| q.accel == "kvm").unwrap_or(true)
         && Path::new("/dev/kvm").exists();
-    let nvram_args = build_nvram_qemu_args(boot_config.qemu.as_ref(), &boot_config.memory, use_kvm);
+    let cmdline = image_config.cmdline();
 
-    run_docker_nvram_container(output_dir.path(), &qcow2_path, &nvram_args, use_kvm)?;
+    // Collect (host_path, container_path) pairs and keep TempDirs alive through the run.
+    let mut input_mounts: Vec<(PathBuf, String)> = Vec::new();
+    let staging_dir: Option<tempfile::TempDir>;
+
+    if is_direct_boot {
+        let direct = image_config.direct_boot()
+            .context("Direct boot config not found in metadata")?;
+        let ovmf_path = parent_dir.join(&boot_config.bios);
+        let kernel_path = parent_dir.join(&direct.kernel)
+            .canonicalize()
+            .with_context(|| format!("Kernel not found: {}", direct.kernel))?;
+        let initrd_path = parent_dir.join(&direct.initrd)
+            .canonicalize()
+            .with_context(|| format!("Initrd not found: {}", direct.initrd))?;
+
+        // Split OVMF: VARS pre-staged to output_dir (pflash 1); CODE bind-mounted (pflash 0).
+        let sd = tempfile::tempdir().context("Failed to create OVMF staging dir")?;
+        stage_ovmf_for_nvram(&ovmf_path, output_dir.path(), sd.path())?;
+
+        input_mounts.push((sd.path().join("OVMF_CODE.fd"), "/input/OVMF_CODE.fd".to_owned()));
+        input_mounts.push((kernel_path, "/input/kernel".to_owned()));
+        input_mounts.push((initrd_path, "/input/initrd".to_owned()));
+        staging_dir = Some(sd);
+    } else {
+        let indirect = image_config.indirect_boot()
+            .context("Indirect boot config not found in metadata")?;
+        let qcow2_path = parent_dir.join(&indirect.qcow2)
+            .canonicalize()
+            .with_context(|| format!("qcow2 not found: {}", indirect.qcow2))?;
+        input_mounts.push((qcow2_path, "/input/disk.qcow2".to_owned()));
+        staging_dir = None;
+    }
+
+    let nvram_args = build_nvram_qemu_args(
+        boot_config.qemu.as_ref(), &boot_config.memory, use_kvm, is_direct_boot, cmdline,
+    );
+    let mount_refs: Vec<(&Path, &str)> = input_mounts
+        .iter()
+        .map(|(p, s)| (p.as_path(), s.as_str()))
+        .collect();
+    run_docker_nvram_container(output_dir.path(), &mount_refs, &nvram_args, use_kvm)?;
+    drop(staging_dir);
 
     let produced = output_dir.path().join(NVRAM_OUT);
     if !produced.exists() {
