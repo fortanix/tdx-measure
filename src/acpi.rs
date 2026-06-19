@@ -548,6 +548,15 @@ fn is_tdx_object(obj: &str) -> bool {
     matches!(obj_type, "tdx-guest" | "memory-backend-memfd-private" | "iommufd")
 }
 
+/// Return true for `-device` specs that cannot be created when booting OVMF
+/// purely to populate NVRAM: `vhost-*` devices need host `/dev/vhost-*` nodes,
+/// and `netdev=`-backed devices need a `-netdev` backend we don't supply.
+/// None of these affect the Boot0000 device path we want to capture.
+fn is_nvram_incompatible_device(dev: &str) -> bool {
+    let dev_type = dev.split(',').next().unwrap_or("");
+    dev_type.starts_with("vhost-") || dev.contains("netdev=")
+}
+
 /// Scan a list of `-device` values and return the first `drive=X` ID found.
 fn find_drive_id(devices: &[String]) -> Option<String> {
     for dev in devices {
@@ -662,6 +671,13 @@ fn build_nvram_qemu_args(
                 }
             }
             for dev in &q.devices {
+                // Direct boot's Boot0000 is the fw_cfg kernel path, independent
+                // of PCI devices, so skip them all to avoid missing-backend
+                // errors.  Indirect boot keeps the disk device but drops
+                // host-backed devices (vhost, netdev) we can't materialize.
+                if is_direct_boot || is_nvram_incompatible_device(dev) {
+                    continue;
+                }
                 push(&mut args, "-device", dev);
             }
 
