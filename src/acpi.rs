@@ -383,6 +383,7 @@ fn build_qemu_args(qemu: Option<&QemuShape>, cpus: u8, memory: &str) -> Vec<OsSt
             for v in &q.netdevs { push(&mut args, "-netdev", v); }
             for v in &q.devices { push(&mut args, "-device", v); }
             for v in &q.fw_cfg  { push(&mut args, "-fw_cfg", v); }
+            if let Some(serial) = &q.serial { push(&mut args, "-serial", serial); }
         }
         None => {
             // Canonical direct-boot defaults: minimal args from
@@ -865,6 +866,7 @@ mod tests {
                 "virtio-rng-pci".into(),
             ],
             fw_cfg: vec!["name=opt/ovmf/X-PciMmio64Mb,string=262144".into()],
+            serial: None,
         };
         let args = build_qemu_args(Some(&shape), 8, "16384M")
             .into_iter()

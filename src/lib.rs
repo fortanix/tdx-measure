@@ -70,6 +70,10 @@ pub struct QemuShape {
     pub devices: Vec<String>,
     #[serde(default)]
     pub fw_cfg: Vec<String>,
+    /// Value for QEMU's `-serial` flag (e.g. `"stdio"`, `"null"`). When omitted,
+    /// no `-serial` flag is passed.
+    #[serde(default)]
+    pub serial: Option<String>,
 }
 
 fn default_cpu() -> String { "host".to_string() }
