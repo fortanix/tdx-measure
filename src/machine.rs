@@ -34,6 +34,11 @@ pub struct Machine<'a> {
     pub create_acpi_table: bool,
     pub distribution: &'a str,
     pub qemu_version: Option<&'a str>,
+    /// When set (together with `qemu_source_sha256`), build QEMU from this
+    /// source tarball URL (hash-verified) instead of the distribution package.
+    pub qemu_source_url: Option<&'a str>,
+    /// Expected SHA-256 (hex) of the `qemu_source_url` tarball.
+    pub qemu_source_sha256: Option<&'a str>,
     pub patch_kernel: bool,
 }
 
