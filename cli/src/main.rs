@@ -51,6 +51,12 @@ struct Cli {
     /// `pull-lp-source`'s current main-archive pick.
     #[arg(long, num_args = 1..=2, value_names = ["DISTRIBUTION", "QEMU_VERSION"])]
     create_acpi_tables: Option<Vec<String>>,
+
+    /// Apply QEMU-style kernel boot-params patching before measuring RTMR1.
+    /// Pass `--patch-kernel` for kernels before Ubuntu:26.04,
+    /// 26.04 and above kernels are loaded via the EFI stub and measured as-is.
+    #[arg(long, default_value_t = false)]
+    patch_kernel: bool,
 }
 
 /// Helper struct to resolve and store file paths
@@ -138,6 +144,7 @@ impl PathResolver {
         create_acpi_table: bool,
         distribution: &'a str,
         qemu_version: Option<&'a str>,
+        patch_kernel: bool,
     ) -> Machine<'a> {
         Machine::builder()
             .cpu_count(self.paths.cpu_count)
@@ -161,6 +168,7 @@ impl PathResolver {
             .create_acpi_table(create_acpi_table)
             .distribution(distribution)
             .maybe_qemu_version(qemu_version)
+            .patch_kernel(patch_kernel)
             .build()
     }
 }
@@ -226,6 +234,7 @@ fn process_measurements(config: &Cli, image_config: &ImageConfig) -> Result<()> 
         create_acpi_table,
         distribution,
         qemu_version,
+        config.patch_kernel,
     );
 
     // Measure
