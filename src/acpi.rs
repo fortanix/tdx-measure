@@ -32,7 +32,13 @@ pub struct Tables {
 impl Machine<'_> {
     pub fn build_tables(&self) -> Result<Tables> {
         if self.direct_boot && self.create_acpi_table {
-            generate_acpi_tables(self.metadata_path, self.distribution, self.qemu_version)?;
+            generate_acpi_tables(
+                self.metadata_path,
+                self.distribution,
+                self.qemu_version,
+                self.qemu_source_url,
+                self.qemu_source_sha256,
+            )?;
         }
 
         let tables  = read_file_data(self.acpi_tables)?;
@@ -317,21 +323,31 @@ fn find_acpi_table(tables: &[u8], signature: &str) -> Result<(u32, u32, u32)> {
     bail!("Table not found: {signature}");
 }
 
-/// Describes how to fetch the QEMU source package for a given distribution.
+/// Describes how to fetch the QEMU source for a given distribution.
 struct QemuPkg<'a> {
     /// `ppa` -> `pull-ppa-source --ppa ppa:kobuk-team/tdx-release qemu $VERSION`
     /// `main` -> `pull-lp-source qemu $VERSION` (or latest in main when empty)
+    /// `url`  -> download a source tarball from `url` and verify it against `sha256`
     source: &'static str,
     /// Version handed to the source fetcher. Empty string == "let the fetcher
-    /// pick the current main-archive version" (only meaningful for `main`).
+    /// pick the current main-archive version" (only meaningful for `main`/`ppa`).
     version: &'a str,
     /// Immutable OCI digest of the base image (`sha256:...`).
     image_digest: &'static str,
+    /// For `source == "url"`: the QEMU source-tarball URL and its expected
+    /// SHA-256 (hex). Ignored for `ppa`/`main`.
+    url: Option<&'a str>,
+    sha256: Option<&'a str>,
 }
 
 fn qemu_pkg_for<'a>(distribution: &str, version_override: Option<&'a str>) -> Result<QemuPkg<'a>> {
     // Pinned defaults for reproducibility; override via `--qemu-version`.
     let (source, default_version, image_digest): (&'static str, &'static str, &'static str) = match distribution {
+        "ubuntu:24.04" => (
+            "ppa",
+            "2:8.2.2+ds-0ubuntu1.4+tdx1.1",
+            "sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54",
+        ),
         "ubuntu:25.04" => (
             "ppa",
             "1:9.2.1+ds-1ubuntu4+tdx2.0~ppa2",
@@ -343,13 +359,15 @@ fn qemu_pkg_for<'a>(distribution: &str, version_override: Option<&'a str>) -> Re
             "sha256:f3d28607ddd78734bb7f71f117f3c6706c666b8b76cbff7c9ff6e5718d46ff64",
         ),
         other => bail!(
-            "Unsupported distribution: {other}. Supported: ubuntu:25.04, ubuntu:26.04"
+            "Unsupported distribution: {other}. Supported: ubuntu:24.04, ubuntu:25.04, ubuntu:26.04"
         ),
     };
     Ok(QemuPkg {
         source,
         version: version_override.unwrap_or(default_version),
         image_digest,
+        url: None,
+        sha256: None,
     })
 }
 
@@ -383,6 +401,7 @@ fn build_qemu_args(qemu: Option<&QemuShape>, cpus: u8, memory: &str) -> Vec<OsSt
             for v in &q.netdevs { push(&mut args, "-netdev", v); }
             for v in &q.devices { push(&mut args, "-device", v); }
             for v in &q.fw_cfg  { push(&mut args, "-fw_cfg", v); }
+            if let Some(serial) = &q.serial { push(&mut args, "-serial", serial); }
         }
         None => {
             // Canonical direct-boot defaults: minimal args from
@@ -436,6 +455,11 @@ fn build_docker_image(
             "QEMU source: {distribution} main archive ({})",
             if pkg.version.is_empty() { "latest" } else { pkg.version }
         ),
+        "url" => info!(
+            "QEMU source: tarball {} (sha256 {}) on {distribution}",
+            pkg.url.expect("Missing QEMU url for source type `url`"),
+            pkg.sha256.expect("Missing QEMU sha256 hash for source type `url`"),
+        ),
         other => info!(
             "QEMU source: {other} ({})",
             if pkg.version.is_empty() { "?" } else { pkg.version }
@@ -443,13 +467,18 @@ fn build_docker_image(
     }
 
     let pinned_image = format!("{distribution}@{}", pkg.image_digest);
-    let status = Command::new("docker")
-        .arg("build")
+    let mut cmd = Command::new("docker");
+    cmd.arg("build")
         .args(["--progress", "plain", "--tag", IMAGE_NAME])
         .arg("--build-arg").arg(format!("DISTRIBUTION={pinned_image}"))
         .arg("--build-arg").arg(format!("QEMU_SOURCE={}", pkg.source))
         .arg("--build-arg").arg(format!("QEMU_VERSION={}", pkg.version))
-        .arg("--build-arg").arg(format!("ACPI_TABLES_NAME={acpi_tables_name}"))
+        .arg("--build-arg").arg(format!("ACPI_TABLES_NAME={acpi_tables_name}"));
+    if pkg.source == "url" {
+        cmd.arg("--build-arg").arg(format!("QEMU_URL={}", pkg.url.expect("Missing QEMU url for source type `url`")));
+        cmd.arg("--build-arg").arg(format!("QEMU_SHA256={}", pkg.sha256.expect("Missing QEMU sha256 hash for source type `url`")));
+    }
+    let status = cmd
         .arg("--file").arg(dockerfile_dir.join("Dockerfile.qemu-acpi-dump"))
         .arg(dockerfile_dir)
         .status()
@@ -518,8 +547,24 @@ pub fn generate_acpi_tables(
     metadata_path: &Path,
     distribution: &str,
     qemu_version: Option<&str>,
+    qemu_source_url: Option<&str>,
+    qemu_source_sha256: Option<&str>,
 ) -> Result<()> {
-    let pkg = qemu_pkg_for(distribution, qemu_version)?;
+    let mut pkg = qemu_pkg_for(distribution, qemu_version)?;
+    // When a source URL + SHA-256 are supplied, build QEMU from that tarball
+    // (hash-verified) instead of the distribution's PPA/main package. Both must
+    // be provided together.
+    match (qemu_source_url, qemu_source_sha256) {
+        (Some(url), Some(sha256)) => {
+            pkg.source = "url";
+            pkg.url = Some(url);
+            pkg.sha256 = Some(sha256);
+        }
+        (Some(_), None) | (None, Some(_)) => bail!(
+            "--qemu-source-url and --qemu-source-sha256 must be provided together"
+        ),
+        (None, None) => {}
+    }
 
     let raw_metadata = fs_err::read_to_string(metadata_path)
         .context("Failed to read metadata.json for ACPI generation")?;
@@ -812,6 +857,17 @@ mod tests {
         assert_eq!(p.version, "1:10.2.1+ds-1ubuntu4");
         assert!(p.image_digest.starts_with("sha256:"));
         assert_eq!(p.image_digest.len(), "sha256:".len() + 64);
+
+    }
+
+    #[test]
+    fn qemu_pkg_for_supports_24_04_via_ppa() {
+        let p = qemu_pkg_for("ubuntu:24.04", None).unwrap();
+        assert_eq!(p.source, "ppa");
+        // 24.04 base image is pinned by digest for reproducibility.
+        assert!(p.image_digest.starts_with("sha256:"));
+        assert_eq!(p.image_digest.len(), "sha256:".len() + 64);
+        assert!(p.url.is_none() && p.sha256.is_none());
     }
 
     #[test]
@@ -865,6 +921,7 @@ mod tests {
                 "virtio-rng-pci".into(),
             ],
             fw_cfg: vec!["name=opt/ovmf/X-PciMmio64Mb,string=262144".into()],
+            serial: None,
         };
         let args = build_qemu_args(Some(&shape), 8, "16384M")
             .into_iter()
