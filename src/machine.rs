@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use crate::tdvf::Tdvf;
-use crate::{kernel, image, TdxMeasurements};
+use crate::{ImageConfig, TdxMeasurements, image, kernel};
 use anyhow::{Context, Result};
 use fs_err as fs;
 use log::debug;
@@ -31,6 +31,7 @@ pub struct Machine<'a> {
     pub sbat_level: Option<&'a str>,
     pub direct_boot: bool,
     pub metadata_path: &'a Path,
+    pub image_config: Option<ImageConfig>,
     pub create_acpi_table: bool,
     pub distribution: &'a str,
     pub qemu_version: Option<&'a str>,
