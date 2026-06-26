@@ -9,7 +9,7 @@ use sha2::{Digest, Sha384};
 
 use crate::num::read_le;
 use crate::util::{debug_print_log, measure_sha384, measure_log, utf16_encode, read_file_data};
-use crate::Machine;
+use crate::{ImageConfig, Machine};
 
 const PAGE_SIZE: u64 = 0x1000;
 const MR_EXTEND_GRANULARITY: usize = 0x100;
@@ -268,7 +268,11 @@ impl<'a> Tdvf<'a> {
         let cfv_hash = self.measure_cfv().context("Failed to find CFV section")?;
 
         // Build ACPI tables
-        let tables = machine.build_tables()?;
+        let tables = if let Some(ImageConfig{boot_config: Some(boot_config),direct: _, indirect: _}) = &machine.image_config {
+            machine.build_tables_with_boot_config(boot_config)?
+        } else {
+            machine.build_tables()?
+        };
         let acpi_tables_hash = measure_sha384(&tables.tables);
         let acpi_rsdp_hash = measure_sha384(&tables.rsdp);
         let acpi_loader_hash = measure_sha384(&tables.loader);
