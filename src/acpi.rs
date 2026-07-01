@@ -493,7 +493,7 @@ fn build_docker_image(
     let pinned_image = format!("{distribution}@{}", pkg.image_digest);
     let mut cmd = Command::new("docker");
     cmd.arg("build")
-        .args(["--progress", "plain", "--tag", IMAGE_NAME])
+        .args([ "--tag", IMAGE_NAME])
         .arg("--build-arg").arg(format!("DISTRIBUTION={pinned_image}"))
         .arg("--build-arg").arg(format!("QEMU_SOURCE={}", pkg.source))
         .arg("--build-arg").arg(format!("QEMU_VERSION={}", pkg.version))
