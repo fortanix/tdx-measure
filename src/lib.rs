@@ -1,10 +1,10 @@
-use bon::Builder;
 /*
  * Copyright (c) 2025 Phala Network
  * Copyright (c) 2025 Tinfoil Inc
  * Copyright (c) 2025 Intel Corporation
  * SPDX-License-Identifier: Apache-2.0
  */
+use bon::Builder;
 use serde::{Deserialize, Serialize};
 use serde_human_bytes as hex_bytes;
 use anyhow::{anyhow, Result};
