@@ -76,22 +76,42 @@ impl Machine<'_> {
     }
 
     pub fn build_tables_with_boot_config(&self, boot_config: &BootConfig) -> Result<Tables> {
-        if self.direct_boot && self.create_acpi_table {
-            let maybe_acpi_tables_target =  if self.acpi_tables.is_empty() {
+        let mut acpi_tables_path = self.acpi_tables;
+        if acpi_tables_path.is_empty() {
+            acpi_tables_path = &boot_config.acpi_tables; // override if Machine::acpi_tables is empty.
+        }
+         let maybe_acpi_tables_target = if acpi_tables_path.is_empty() {
                 None
             } else {
-                let acpi_tables_target = Path::new("").join(&boot_config.acpi_tables);
-                let acpi_tables_dir = acpi_tables_target
-                .parent()
-                .with_context(|| format!("acpi_tables has no parent dir: {}", acpi_tables_target.display()))?;
+                let acpi_tables_target = Path::new("").join(acpi_tables_path);
+                let acpi_tables_dir = acpi_tables_target.parent().with_context(|| {
+                    format!(
+                        "acpi_tables has no parent dir: {}",
+                        acpi_tables_target.display()
+                    )
+                })?;
                 fs_err::create_dir_all(acpi_tables_dir)?;
                 Some(acpi_tables_target)
             };
-
-            let tables = generate_acpi_tables_with_qemu_args(boot_config, self.distribution, self.qemu_version, self.qemu_source_url, self.qemu_source_sha256, maybe_acpi_tables_target.as_ref())?;
+        let generate_tables = || {
+            let tables = generate_acpi_tables_with_qemu_args(
+                    boot_config,
+                    self.distribution,
+                    self.qemu_version,
+                    self.qemu_source_url,
+                    self.qemu_source_sha256,
+                    maybe_acpi_tables_target.as_ref(),
+                )?;
             self.process_acpi_tables(tables)
+        };
+        if self.create_acpi_table {
+            if self.direct_boot {
+                generate_tables()
+            } else {
+                Err(anyhow!("ACPI table cannot be generated for `indirect_boot`"))
+            }
         } else {
-            Err(anyhow!("ACPI table can be generated only in `direct_boot` and when `create_acpi_table: true`"))
+            generate_tables()
         }
     }
 }
