@@ -4,6 +4,7 @@
  * Copyright (c) 2025 Intel Corporation
  * SPDX-License-Identifier: Apache-2.0
  */
+use bon::Builder;
 use serde::{Deserialize, Serialize};
 use serde_human_bytes as hex_bytes;
 use anyhow::{anyhow, Result};
@@ -38,7 +39,7 @@ pub struct TdxMeasurements {
 }
 
 /// Common boot configuration (platform-specific)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
 pub struct BootConfig {
     pub cpus: u8,
     pub memory: String,
@@ -99,7 +100,7 @@ pub struct IndirectBoot {
 }
 
 /// Complete image configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
 pub struct ImageConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub boot_config: Option<BootConfig>,
