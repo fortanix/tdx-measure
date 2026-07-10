@@ -290,6 +290,7 @@ impl<'a> Tdvf<'a> {
         let (boot_order_data, boot_entries) = parse_boot_order(machine)?;
 
         // Compute RTMR0 log
+        // Compute RTMR0 log
         let mut rtmr0_log = vec![
             td_hob_hash,
             cfv_hash,
@@ -299,11 +300,14 @@ impl<'a> Tdvf<'a> {
             measure_tdx_efi_variable("D719B2CB-3D3A-4596-A3BC-DAD00E67656F", "db", None)?,
             measure_tdx_efi_variable("D719B2CB-3D3A-4596-A3BC-DAD00E67656F", "dbx", None)?,
             measure_sha384(&[0x00, 0x00, 0x00, 0x00]), // Separator
-            acpi_loader_hash,
-            acpi_rsdp_hash,
-            acpi_tables_hash,
-            measure_sha384(&boot_order_data), // Always measure BootOrder itself
         ];
+
+        if !machine.exclude_acpi_tables_rtmr0 {
+            rtmr0_log.push(acpi_loader_hash);
+            rtmr0_log.push(acpi_rsdp_hash);
+            rtmr0_log.push(acpi_tables_hash);
+        }
+        rtmr0_log.push(measure_sha384(&boot_order_data)); // Always measure BootOrder itself
 
         if machine.direct_boot {
             // Boot0000 data for direct boot mode

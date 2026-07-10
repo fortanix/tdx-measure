@@ -67,6 +67,9 @@ struct Cli {
     /// Expected SHA-256 (hex) of the --qemu-source-url tarball.
     #[arg(long, value_name = "HEX")]
     qemu_source_sha256: Option<String>,
+    /// Exclude ACPI tables measurement from RTMR0
+    #[arg(long, default_value_t = false)]
+    exclude_acpi_tables_rtmr0: bool,
 }
 
 /// Helper struct to resolve and store file paths
@@ -157,6 +160,7 @@ impl PathResolver {
         patch_kernel: bool,
         qemu_source_url: Option<&'a str>,
         qemu_source_sha256: Option<&'a str>,
+        exclude_acpi_tables_rtmr0: bool,
     ) -> Machine<'a> {
         Machine::builder()
             .cpu_count(self.paths.cpu_count)
@@ -183,6 +187,7 @@ impl PathResolver {
             .patch_kernel(patch_kernel)
             .maybe_qemu_source_url(qemu_source_url)
             .maybe_qemu_source_sha256(qemu_source_sha256)
+            .exclude_acpi_tables_rtmr0(exclude_acpi_tables_rtmr0)
             .build()
     }
 }
@@ -251,6 +256,7 @@ fn process_measurements(config: &Cli, image_config: &ImageConfig) -> Result<()> 
         config.patch_kernel,
         config.qemu_source_url.as_deref(),
         config.qemu_source_sha256.as_deref(),
+        config.exclude_acpi_tables_rtmr0,
     );
 
     // Measure

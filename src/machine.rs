@@ -41,6 +41,8 @@ pub struct Machine<'a> {
     /// Expected SHA-256 (hex) of the `qemu_source_url` tarball.
     pub qemu_source_sha256: Option<&'a str>,
     pub patch_kernel: bool,
+    #[builder(default)]
+    pub exclude_acpi_tables_rtmr0: bool,
 }
 
 impl Machine<'_> {
