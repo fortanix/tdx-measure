@@ -120,3 +120,79 @@ fn measure_platform_matches_expected_json_for_every_fixture() {
         );
     }
 }
+
+#[test]
+fn exclude_acpi_tables() {
+    for fixture in discover_fixtures() {
+        let (cfg, metadata_path) = machine_for(&fixture);
+        let bc = cfg.boot_config.as_ref().expect("boot_config required");
+
+        let bios = ovmf_path().display().to_string();
+
+        let machine = Machine::builder()
+            .cpu_count(bc.cpus)
+            .memory_size(cfg.memory_size().expect("memory_size"))
+            .firmware(bios.as_str())
+            .kernel_cmdline("")
+            .acpi_tables("this_file_does_not_exist")
+            .rsdp("")
+            .table_loader("")
+            .boot_order("")
+            .path_boot_xxxx("")
+            .kernel("/dev/null")
+            .initrd("/dev/null")
+            .qcow2("")
+            .mok_list("")
+            .mok_list_trusted("")
+            .mok_list_x("")
+            .sbat_level("")
+            .direct_boot(true)
+            .metadata_path(&metadata_path)
+            .create_acpi_table(false)
+            .distribution("")
+            .patch_kernel(true)
+            .exclude_acpi_tables_rtmr0(true)
+            .build();
+
+        let m = machine.measure_platform();
+        assert!(m.is_ok(), "measure_platform failed when exclude_acpi_tables_rtmr0 was set but file was missing: {:?}", m.err());
+        let m = m.unwrap();
+        assert_eq!(m.rtmr0.len(), 48);
+    }
+}
+
+#[test]
+fn missing_acpi_tables() {
+    for fixture in discover_fixtures() {
+        let (cfg, metadata_path) = machine_for(&fixture);
+        let bc = cfg.boot_config.as_ref().expect("boot_config required");
+
+        let bios = ovmf_path().display().to_string();
+
+        let machine_fail = Machine::builder()
+            .cpu_count(bc.cpus)
+            .memory_size(cfg.memory_size().expect("memory_size"))
+            .firmware(bios.as_str())
+            .kernel_cmdline("")
+            .acpi_tables("this_file_does_not_exist")
+            .rsdp("")
+            .table_loader("")
+            .boot_order("")
+            .path_boot_xxxx("")
+            .kernel("/dev/null")
+            .initrd("/dev/null")
+            .qcow2("")
+            .mok_list("")
+            .mok_list_trusted("")
+            .mok_list_x("")
+            .sbat_level("")
+            .direct_boot(true)
+            .metadata_path(&metadata_path)
+            .create_acpi_table(false)
+            .distribution("")
+            .patch_kernel(true)
+            .exclude_acpi_tables_rtmr0(false)
+            .build();
+        assert!(machine_fail.measure_platform().is_err(), "expected failure when exclude_acpi_tables_rtmr0 is false but file is missing");
+    }
+}

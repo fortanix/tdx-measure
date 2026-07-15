@@ -272,24 +272,29 @@ impl<'a> Tdvf<'a> {
         let cfv_hash = self.measure_cfv().context("Failed to find CFV section")?;
 
         // Build ACPI tables
-        let tables = if let Some(ImageConfig {
-            boot_config: Some(boot_config),
-            direct: _,
-            indirect: _,
-        }) = &machine.image_config
-        {
-            machine.build_tables_with_boot_config(boot_config)?
-        } else {
-            machine.build_tables()?
-        };
-        let acpi_tables_hash = measure_sha384(&tables.tables);
-        let acpi_rsdp_hash = measure_sha384(&tables.rsdp);
-        let acpi_loader_hash = measure_sha384(&tables.loader);
+        let mut acpi_tables_hash = None;
+        let mut acpi_rsdp_hash = None;
+        let mut acpi_loader_hash = None;
+
+        if !machine.exclude_acpi_tables_rtmr0 {
+            let tables = if let Some(ImageConfig {
+                boot_config: Some(boot_config),
+                direct: _,
+                indirect: _,
+            }) = &machine.image_config
+            {
+                machine.build_tables_with_boot_config(boot_config)?
+            } else {
+                machine.build_tables()?
+            };
+            acpi_tables_hash = Some(measure_sha384(&tables.tables));
+            acpi_rsdp_hash = Some(measure_sha384(&tables.rsdp));
+            acpi_loader_hash = Some(measure_sha384(&tables.loader));
+        }
 
         // Load boot order data and entries
         let (boot_order_data, boot_entries) = parse_boot_order(machine)?;
 
-        // Compute RTMR0 log
         // Compute RTMR0 log
         let mut rtmr0_log = vec![
             td_hob_hash,
@@ -303,9 +308,22 @@ impl<'a> Tdvf<'a> {
         ];
 
         if !machine.exclude_acpi_tables_rtmr0 {
-            rtmr0_log.push(acpi_loader_hash);
-            rtmr0_log.push(acpi_rsdp_hash);
-            rtmr0_log.push(acpi_tables_hash);
+            let loader_exists = acpi_loader_hash.is_some();
+            let rsdp_exists = acpi_rsdp_hash.is_some();
+            let tables_exist = acpi_tables_hash.is_some();
+            match (acpi_loader_hash, acpi_rsdp_hash, acpi_tables_hash) {
+                (Some(loader), Some(rsdp), Some(tables)) => {
+                    rtmr0_log.push(loader);
+                    rtmr0_log.push(rsdp);
+                    rtmr0_log.push(tables);
+                }
+                _ => anyhow::bail!(
+                    "Missing Acpi hashes, existance of loader: {}, rsdp: {}, tables: {}",
+                    loader_exists,
+                    rsdp_exists,
+                    tables_exist,
+                ),
+            }
         }
         rtmr0_log.push(measure_sha384(&boot_order_data)); // Always measure BootOrder itself
 

@@ -228,10 +228,13 @@ fn process_measurements(config: &Cli, image_config: &ImageConfig) -> Result<()> 
         if !direct_boot {
             error_msgs.push_str("--create-acpi-tables is not valid with indirect boot\n");
         }
+        if config.exclude_acpi_tables_rtmr0 {
+            error_msgs.push_str("--create-acpi-tables is not valid with --exclude-acpi-tables-rtmr0\n");
+        }
     }
 
     // Check usage of ACPI table path
-    if !config.runtime_only {
+    if !config.runtime_only && !config.exclude_acpi_tables_rtmr0 {
         let acpi_tables_path = Path::new(&path_resolver.paths.acpi_tables);
         let acpi_tables_path_missing = !acpi_tables_path.exists();
         if acpi_tables_path_missing {
