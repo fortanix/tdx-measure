@@ -272,9 +272,9 @@ impl<'a> Tdvf<'a> {
         let cfv_hash = self.measure_cfv().context("Failed to find CFV section")?;
 
         // Build ACPI tables
-        let mut acpi_tables_hash = None;
-        let mut acpi_rsdp_hash = None;
-        let mut acpi_loader_hash = None;
+        let mut maybe_acpi_tables_hash = None;
+        let mut maybe_acpi_rsdp_hash = None;
+        let mut maybe_acpi_loader_hash = None;
 
         if !machine.exclude_acpi_tables_rtmr0 {
             let tables = if let Some(ImageConfig {
@@ -287,9 +287,9 @@ impl<'a> Tdvf<'a> {
             } else {
                 machine.build_tables()?
             };
-            acpi_tables_hash = Some(measure_sha384(&tables.tables));
-            acpi_rsdp_hash = Some(measure_sha384(&tables.rsdp));
-            acpi_loader_hash = Some(measure_sha384(&tables.loader));
+            maybe_acpi_tables_hash = Some(measure_sha384(&tables.tables));
+            maybe_acpi_rsdp_hash = Some(measure_sha384(&tables.rsdp));
+            maybe_acpi_loader_hash = Some(measure_sha384(&tables.loader));
         }
 
         // Load boot order data and entries
@@ -308,10 +308,10 @@ impl<'a> Tdvf<'a> {
         ];
 
         if !machine.exclude_acpi_tables_rtmr0 {
-            let loader_exists = acpi_loader_hash.is_some();
-            let rsdp_exists = acpi_rsdp_hash.is_some();
-            let tables_exist = acpi_tables_hash.is_some();
-            match (acpi_loader_hash, acpi_rsdp_hash, acpi_tables_hash) {
+            let loader_exists = maybe_acpi_loader_hash.is_some();
+            let rsdp_exists = maybe_acpi_rsdp_hash.is_some();
+            let tables_exist = maybe_acpi_tables_hash.is_some();
+            match (maybe_acpi_loader_hash, maybe_acpi_rsdp_hash, maybe_acpi_tables_hash) {
                 (Some(loader), Some(rsdp), Some(tables)) => {
                     rtmr0_log.push(loader);
                     rtmr0_log.push(rsdp);

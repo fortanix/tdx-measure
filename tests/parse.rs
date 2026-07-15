@@ -122,7 +122,7 @@ fn measure_platform_matches_expected_json_for_every_fixture() {
 }
 
 #[test]
-fn exclude_acpi_tables() {
+fn missing_acpi_tables_with_exclude_acpi_tables_rtmr0() {
     for fixture in discover_fixtures() {
         let (cfg, metadata_path) = machine_for(&fixture);
         let bc = cfg.boot_config.as_ref().expect("boot_config required");
@@ -162,7 +162,7 @@ fn exclude_acpi_tables() {
 }
 
 #[test]
-fn missing_acpi_tables() {
+fn missing_acpi_tables_without_exclude_acpi_tables_rtmr0() {
     for fixture in discover_fixtures() {
         let (cfg, metadata_path) = machine_for(&fixture);
         let bc = cfg.boot_config.as_ref().expect("boot_config required");
