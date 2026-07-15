@@ -272,19 +272,25 @@ impl<'a> Tdvf<'a> {
         let cfv_hash = self.measure_cfv().context("Failed to find CFV section")?;
 
         // Build ACPI tables
-        let tables = if let Some(ImageConfig {
-            boot_config: Some(boot_config),
-            direct: _,
-            indirect: _,
-        }) = &machine.image_config
-        {
-            machine.build_tables_with_boot_config(boot_config)?
-        } else {
-            machine.build_tables()?
-        };
-        let acpi_tables_hash = measure_sha384(&tables.tables);
-        let acpi_rsdp_hash = measure_sha384(&tables.rsdp);
-        let acpi_loader_hash = measure_sha384(&tables.loader);
+        let mut maybe_acpi_tables_hash = None;
+        let mut maybe_acpi_rsdp_hash = None;
+        let mut maybe_acpi_loader_hash = None;
+
+        if !machine.exclude_acpi_tables_rtmr0 {
+            let tables = if let Some(ImageConfig {
+                boot_config: Some(boot_config),
+                direct: _,
+                indirect: _,
+            }) = &machine.image_config
+            {
+                machine.build_tables_with_boot_config(boot_config)?
+            } else {
+                machine.build_tables()?
+            };
+            maybe_acpi_tables_hash = Some(measure_sha384(&tables.tables));
+            maybe_acpi_rsdp_hash = Some(measure_sha384(&tables.rsdp));
+            maybe_acpi_loader_hash = Some(measure_sha384(&tables.loader));
+        }
 
         // Load boot order data and entries
         let (boot_order_data, boot_entries) = parse_boot_order(machine)?;
@@ -299,11 +305,27 @@ impl<'a> Tdvf<'a> {
             measure_tdx_efi_variable("D719B2CB-3D3A-4596-A3BC-DAD00E67656F", "db", None)?,
             measure_tdx_efi_variable("D719B2CB-3D3A-4596-A3BC-DAD00E67656F", "dbx", None)?,
             measure_sha384(&[0x00, 0x00, 0x00, 0x00]), // Separator
-            acpi_loader_hash,
-            acpi_rsdp_hash,
-            acpi_tables_hash,
-            measure_sha384(&boot_order_data), // Always measure BootOrder itself
         ];
+
+        if !machine.exclude_acpi_tables_rtmr0 {
+            let loader_exists = maybe_acpi_loader_hash.is_some();
+            let rsdp_exists = maybe_acpi_rsdp_hash.is_some();
+            let tables_exist = maybe_acpi_tables_hash.is_some();
+            match (maybe_acpi_loader_hash, maybe_acpi_rsdp_hash, maybe_acpi_tables_hash) {
+                (Some(loader), Some(rsdp), Some(tables)) => {
+                    rtmr0_log.push(loader);
+                    rtmr0_log.push(rsdp);
+                    rtmr0_log.push(tables);
+                }
+                _ => anyhow::bail!(
+                    "Missing Acpi hashes, existance of loader: {}, rsdp: {}, tables: {}",
+                    loader_exists,
+                    rsdp_exists,
+                    tables_exist,
+                ),
+            }
+        }
+        rtmr0_log.push(measure_sha384(&boot_order_data)); // Always measure BootOrder itself
 
         if machine.direct_boot {
             // Boot0000 data for direct boot mode
